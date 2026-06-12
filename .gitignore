@@ -3,3 +3,6 @@ bin/
 obj/
 *.user
 .vs/
+
+# .deb publish + staging output (scripts/build-deb.sh)
+artifacts/

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <!-- The pdn-app.yaml manifest's `service.command: ./pdn-convers` names the published binary. -->
+    <AssemblyName>pdn-convers</AssemblyName>
+    <RootNamespace>Convers.Host</RootNamespace>
+    <!-- Keep in lockstep with pdn-app.yaml `version:`. -->
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Convers.Protocol\Convers.Protocol.csproj" />
+    <ProjectReference Include="..\Convers.Core\Convers.Core.csproj" />
+    <ProjectReference Include="..\Convers.Console\Convers.Console.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- RhpV2.Client lands in W5 (the RHP client + inbound demux + uplink providers). -->
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+
+</Project>

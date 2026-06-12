@@ -1,0 +1,48 @@
+# conversd-saupp oracle image — builds the vendored DL9SAU conversd from source and runs it as the
+# stand-in upstream parent node for the interop lane (design.md decision 10; HANDOVER.md §6 step 5).
+#
+# Build context is the REPO ROOT (compose `context: ..`) so the vendored source under
+# reference/conversd-saupp/ and the oracle config under docker/oracle/ are both reachable.
+#
+# Only the `conversd` server target is built (not the readline `convers` client), so the build needs
+# no libreadline/ncurses — just a C toolchain. conversd derives its config filenames from the binary
+# name: /usr/local/etc/conversd/{conversd.conf,conversd.motd,conversd.issue,convers.help}, and writes
+# state + pid under /var/cache/conversd. It drops its effective uid to `daemon` at startup, so that
+# state tree is owned by daemon; the container itself starts as root so the seteuid() succeeds.
+
+# ---- build stage ----------------------------------------------------------
+FROM debian:bookworm-slim AS build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY reference/conversd-saupp/ ./
+# Build just the daemon. CONF_DIR/DATA_DIR are compiled in from the Makefile defaults
+# (/usr/local/etc/conversd, /var/cache/conversd).
+RUN make conversd
+
+# ---- runtime stage --------------------------------------------------------
+FROM debian:bookworm-slim
+# conversd links -lutil (forkpty); on bookworm glibc that resolves via libc, no extra package needed.
+COPY --from=build /src/conversd /usr/local/sbin/conversd
+
+# Config: our oracle-tuned conversd.conf + a minimal issue/motd, plus the canonical help text.
+RUN mkdir -p /usr/local/etc/conversd
+COPY docker/oracle/conversd.conf  /usr/local/etc/conversd/conversd.conf
+COPY docker/oracle/convers.issue  /usr/local/etc/conversd/conversd.issue
+COPY docker/oracle/convers.motd   /usr/local/etc/conversd/conversd.motd
+COPY reference/conversd-saupp/etc/convers.help /usr/local/etc/conversd/convers.help
+
+# State tree, owned by daemon (conversd's dropped effective uid writes here: pidfile, logs, the unix
+# listener socket, persisted personals/nicknames/topics).
+RUN install -d -o daemon -g daemon \
+      /var/cache/conversd \
+      /var/cache/conversd/log \
+      /var/cache/conversd/sockets \
+      /var/cache/conversd/personals \
+      /var/cache/conversd/nicknames \
+      /var/cache/conversd/conversrc
+
+EXPOSE 3600
+# -f: stay in the foreground (no fork) so conversd is the container's main process.
+CMD ["/usr/local/sbin/conversd", "-f"]
