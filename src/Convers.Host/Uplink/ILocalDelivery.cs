@@ -35,3 +35,32 @@ public sealed class NullLocalDelivery : ILocalDelivery
         // intentionally nothing
     }
 }
+
+/// <summary>
+/// Observes every inbound (network-origin) <see cref="ConversEvent"/> the <see cref="HostLink"/> applies
+/// to the hub — the half of the chat-log feed that arrives from the uplink (channel messages, PMs,
+/// presence). The Host wires this to the chat-log writer (design decision 7); W5 sees each event exactly
+/// once, before fan-out, so logging is neither missed nor double-counted. The default is a no-op.
+/// </summary>
+public interface IInboundObserver
+{
+    /// <summary>Called for each inbound network-origin event, in order, before it is fanned out.</summary>
+    void OnInbound(ConversEvent inboundEvent);
+}
+
+/// <summary>A no-op <see cref="IInboundObserver"/> — the default when no inbound observer is wired.</summary>
+public sealed class NullInboundObserver : IInboundObserver
+{
+    /// <summary>The shared instance.</summary>
+    public static readonly NullInboundObserver Instance = new();
+
+    private NullInboundObserver()
+    {
+    }
+
+    /// <inheritdoc/>
+    public void OnInbound(ConversEvent inboundEvent)
+    {
+        // intentionally nothing
+    }
+}

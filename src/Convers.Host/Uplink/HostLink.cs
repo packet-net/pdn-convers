@@ -34,13 +34,16 @@ public sealed class HostLink : IAsyncDisposable
     private readonly IUpstreamLinkFactory _factory;
     private readonly ConversHub _hub;
     private readonly ILocalDelivery _local;
+    private readonly IInboundObserver _inbound;
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
     private readonly TimeSpan _tickInterval;
 
-    // Local events queued by the demux (W5), drained on the link's owning loop so the hub stays single-threaded.
-    private readonly System.Threading.Channels.Channel<ConversEvent> _localEvents =
-        System.Threading.Channels.Channel.CreateUnbounded<ConversEvent>(
+    // Work items queued by the demux (W5), drained on the link's owning loop so the hub stays
+    // single-threaded: either a local-originated event to apply, or a read-only snapshot of the hub for
+    // an RF session's `who`/topic query (run on the loop so no lock is needed — design decision 2).
+    private readonly System.Threading.Channels.Channel<HubWork> _localEvents =
+        System.Threading.Channels.Channel.CreateUnbounded<HubWork>(
             new UnboundedChannelOptions { SingleReader = true });
 
     private volatile IUpstreamLink? _link;
@@ -53,7 +56,8 @@ public sealed class HostLink : IAsyncDisposable
         ConversHub hub,
         TimeProvider timeProvider,
         ILogger<HostLink> logger,
-        ILocalDelivery? localDelivery = null)
+        ILocalDelivery? localDelivery = null,
+        IInboundObserver? inboundObserver = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(factory);
@@ -65,6 +69,7 @@ public sealed class HostLink : IAsyncDisposable
         _factory = factory;
         _hub = hub;
         _local = localDelivery ?? NullLocalDelivery.Instance;
+        _inbound = inboundObserver ?? NullInboundObserver.Instance;
         _time = timeProvider;
         _logger = logger;
         // Tick a few times per ping interval so keepalive/silence fire promptly without busy-waiting.
@@ -88,8 +93,36 @@ public sealed class HostLink : IAsyncDisposable
     public ValueTask SubmitLocalEventAsync(ConversEvent @event, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(@event);
-        return _localEvents.Writer.WriteAsync(@event, cancellationToken);
+        return _localEvents.Writer.WriteAsync(new HubWork(@event, null), cancellationToken);
     }
+
+    /// <summary>
+    /// Run a read-only snapshot of the hub on the link's owning loop (so the hub is never read off-loop —
+    /// it is not thread-safe). Used by RF sessions to answer <c>who</c> / topic queries against the live
+    /// network table without racing the loop's mutations. The callback must not mutate the hub.
+    /// </summary>
+    public async ValueTask<T> SnapshotAsync<T>(Func<ConversHub, T> read, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(read);
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Capture(ConversHub hub)
+        {
+            try
+            {
+                tcs.TrySetResult(read(hub));
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        }
+
+        await _localEvents.Writer.WriteAsync(new HubWork(null, Capture), cancellationToken).ConfigureAwait(false);
+        return await tcs.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>One unit of hub work drained on the owning loop: a local event to apply, or a snapshot read.</summary>
+    private readonly record struct HubWork(ConversEvent? Event, Action<ConversHub>? Snapshot);
 
     /// <summary>The connect → handshake → keepalive → reconnect loop; runs until cancelled.</summary>
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -136,7 +169,10 @@ public sealed class HostLink : IAsyncDisposable
             LogReconnectWait(_logger, backoff.TotalSeconds, null);
             try
             {
-                await Task.Delay(backoff, _time, cancellationToken).ConfigureAwait(false);
+                // Wait out the backoff, but keep draining local hub work (events + `who` snapshots) so
+                // local sessions stay live while the uplink is down — and so a local-only deployment
+                // (no uplink, a never-connecting factory) still fans out among RF/web users.
+                await DrainWhileWaitingAsync(backoff, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -144,6 +180,38 @@ public sealed class HostLink : IAsyncDisposable
             }
 
             backoff = backoff * 2 > _options.MaxBackoff ? _options.MaxBackoff : backoff * 2;
+        }
+    }
+
+    /// <summary>
+    /// Drains the local-work queue (events + snapshots) against no link for up to <paramref name="delay"/>,
+    /// returning when the delay elapses. Keeps the hub single-threaded (this is the owning loop) while the
+    /// uplink is between connections.
+    /// </summary>
+    private async Task DrainWhileWaitingAsync(TimeSpan delay, CancellationToken cancellationToken)
+    {
+        Task wait = Task.Delay(delay, _time, cancellationToken);
+        while (true)
+        {
+            var localWait = _localEvents.Reader.WaitToReadAsync(cancellationToken).AsTask();
+            Task completed = await Task.WhenAny(wait, localWait).ConfigureAwait(false);
+            if (completed == localWait)
+            {
+                if (!await localWait.ConfigureAwait(false))
+                {
+                    // The work channel completed (Dispose) — stop draining rather than spin.
+                    await wait.ConfigureAwait(false); // observe cancellation if the delay was cancelled
+                    return;
+                }
+
+                await DrainLocalEventsAsync(null, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (wait.IsCompleted)
+            {
+                await wait.ConfigureAwait(false); // observe cancellation
+                return;
+            }
         }
     }
 
@@ -233,6 +301,9 @@ public sealed class HostLink : IAsyncDisposable
 
         foreach (ConversEvent @event in step.HubEvents)
         {
+            // Surface the inbound (network-origin) event for chat-logging before fanning it out
+            // (design decision 7 — the Host's vantage of all convers activity it sees).
+            _inbound.OnInbound(@event);
             await DispatchActionsAsync(link, _hub.Advance(@event), cancellationToken).ConfigureAwait(false);
         }
 
@@ -245,21 +316,46 @@ public sealed class HostLink : IAsyncDisposable
         return true;
     }
 
-    private async Task DrainLocalEventsAsync(IUpstreamLink link, CancellationToken cancellationToken)
+    private async Task DrainLocalEventsAsync(IUpstreamLink? link, CancellationToken cancellationToken)
     {
-        while (_localEvents.Reader.TryRead(out ConversEvent? @event))
+        while (_localEvents.Reader.TryRead(out HubWork work))
         {
-            await DispatchActionsAsync(link, _hub.Advance(@event), cancellationToken).ConfigureAwait(false);
+            if (work.Snapshot is { } read)
+            {
+                // The snapshot callback already guards its own faults (it completes its TCS with the
+                // exception), so a bad read can never wedge this loop.
+                read(_hub); // read-only snapshot on the owning loop — no hub mutation
+                continue;
+            }
+
+            if (work.Event is not { } @event)
+            {
+                continue;
+            }
+
+            // A single malformed local event must never wedge the owning loop (which is the ONLY drainer
+            // of this queue — a wedge would hang every session's SubmitLocalEventAsync/SnapshotAsync). The
+            // in-connection path is already shielded by RunAsync's broad catch; this guards the backoff
+            // (local-only) path identically.
+            try
+            {
+                await DispatchActionsAsync(link, _hub.Advance(@event), cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                LogLocalEventFailed(_logger, ex.Message, null);
+            }
         }
     }
 
     /// <summary>
-    /// Routes the hub's fan-out: <c>Send*</c>/<c>SendPong</c> go up the wire, <c>DropUplink</c> is honoured
-    /// by reading it (the engine independently drops on /..LOOP), and every <c>Deliver*</c> goes to the
-    /// local sink.
+    /// Routes the hub's fan-out: <c>Send*</c>/<c>SendPong</c> go up the wire (best-effort — silently
+    /// skipped when no link is up, so local fan-out still works in the no-uplink/local-only configuration),
+    /// <c>DropUplink</c> is honoured by reading it (the engine independently drops on /..LOOP), and every
+    /// <c>Deliver*</c> goes to the local sink.
     /// </summary>
     private async Task DispatchActionsAsync(
-        IUpstreamLink link, IReadOnlyList<ConversAction> actions, CancellationToken cancellationToken)
+        IUpstreamLink? link, IReadOnlyList<ConversAction> actions, CancellationToken cancellationToken)
     {
         foreach (ConversAction action in actions)
         {
@@ -272,7 +368,10 @@ public sealed class HostLink : IAsyncDisposable
             HostCommand? command = HostBridge.ToHostCommand(action);
             if (command is not null)
             {
-                await SendCommandAsync(link, command, cancellationToken).ConfigureAwait(false);
+                if (link is not null)
+                {
+                    await SendCommandAsync(link, command, cancellationToken).ConfigureAwait(false);
+                }
             }
             else
             {
@@ -368,4 +467,8 @@ public sealed class HostLink : IAsyncDisposable
     private static readonly Action<ILogger, Exception?> LogPeerClosed =
         LoggerMessage.Define(LogLevel.Information, new EventId(5, "UplinkPeerClosed"),
             "Parent closed the uplink");
+
+    private static readonly Action<ILogger, string, Exception?> LogLocalEventFailed =
+        LoggerMessage.Define<string>(LogLevel.Warning, new EventId(6, "LocalEventFailed"),
+            "A local event failed to apply (skipped): {Reason}");
 }

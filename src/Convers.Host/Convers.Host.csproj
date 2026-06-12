@@ -15,8 +15,15 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- RhpV2.Client lands in W5 (the RHP client + inbound demux + uplink providers). -->
+    <!-- W5: the RHP client (node bind + inbound demux + RF uplink open) and the YAML config. Versions
+         are central in Directory.Packages.props. -->
+    <PackageReference Include="RhpV2.Client" />
     <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The host tests pin the composition's provider selection + host-name derivation (internal helpers). -->
+    <InternalsVisibleTo Include="Convers.Host.Tests" />
   </ItemGroup>
 
 </Project>

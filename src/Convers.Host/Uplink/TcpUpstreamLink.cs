@@ -1,17 +1,16 @@
 using System.Net.Sockets;
-using Convers.Host.Uplink;
 using Convers.Protocol;
 
-namespace Convers.Host.Tests.Uplink;
+namespace Convers.Host.Uplink;
 
 /// <summary>
-/// A minimal TCP-backed <see cref="IUpstreamLink"/> used <em>only</em> by the interop lane to dial the
-/// conversd-saupp oracle over the loopback-published convers port. It is a thin preview of W5's
-/// direct-TCP provider: connect a socket, frame outbound lines with <see cref="ConversWire.FrameLine"/>,
-/// and split inbound bytes on CR/LF (Latin-1) into lines. The production providers (RF/RHP + TCP) land in
-/// W5; this stays in the test project so W4 touches no composition.
+/// The direct-TCP upstream provider (design decision 6): a socket to an internet convers hub (e.g.
+/// HubNA <c>44.68.41.2:3600</c>), Latin-1 line transport. Outbound lines are framed with
+/// <see cref="ConversWire.FrameLine"/> (LF terminator — the canonical TCP terminator); inbound bytes are
+/// split on CR/LF into terminator-stripped lines. One instance models one dial; the
+/// <see cref="HostLink"/> obtains a fresh one per (re)connect via <see cref="TcpUpstreamLinkFactory"/>.
 /// </summary>
-internal sealed class TcpUpstreamLink : IUpstreamLink
+public sealed class TcpUpstreamLink : IUpstreamLink
 {
     private readonly TcpClient _client;
     private readonly NetworkStream _stream;
@@ -24,20 +23,33 @@ internal sealed class TcpUpstreamLink : IUpstreamLink
         _stream = client.GetStream();
     }
 
+    /// <summary>Dials <paramref name="host"/>:<paramref name="port"/> and returns the connected link.</summary>
     public static async Task<TcpUpstreamLink> ConnectAsync(string host, int port, CancellationToken cancellationToken)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(host);
         var client = new TcpClient();
-        await client.ConnectAsync(host, port, cancellationToken);
+        try
+        {
+            await client.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
+
         return new TcpUpstreamLink(client);
     }
 
+    /// <inheritdoc/>
     public async Task SendLineAsync(string line, CancellationToken cancellationToken)
     {
         byte[] framed = ConversWire.FrameLine(line);
-        await _stream.WriteAsync(framed, cancellationToken);
-        await _stream.FlushAsync(cancellationToken);
+        await _stream.WriteAsync(framed, cancellationToken).ConfigureAwait(false);
+        await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc/>
     public async Task<string?> ReceiveLineAsync(CancellationToken cancellationToken)
     {
         while (_pending.Count == 0)
@@ -46,7 +58,7 @@ internal sealed class TcpUpstreamLink : IUpstreamLink
             int read;
             try
             {
-                read = await _stream.ReadAsync(buffer, cancellationToken);
+                read = await _stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
             {
@@ -69,6 +81,7 @@ internal sealed class TcpUpstreamLink : IUpstreamLink
         return _pending.Dequeue();
     }
 
+    /// <inheritdoc/>
     public ValueTask DisposeAsync()
     {
         _stream.Dispose();
@@ -90,9 +103,13 @@ internal sealed class TcpUpstreamLink : IUpstreamLink
     }
 }
 
-/// <summary>An <see cref="IUpstreamLinkFactory"/> that dials a TCP endpoint — the interop lane's dialer.</summary>
-internal sealed class TcpUpstreamLinkFactory(string host, int port) : IUpstreamLinkFactory
+/// <summary>
+/// An <see cref="IUpstreamLinkFactory"/> that dials a TCP convers hub for each (re)connect — the
+/// direct-TCP uplink dialer (<c>config.Uplink.Tcp</c> host:port).
+/// </summary>
+public sealed class TcpUpstreamLinkFactory(string host, int port) : IUpstreamLinkFactory
 {
+    /// <inheritdoc/>
     public async Task<IUpstreamLink> ConnectAsync(CancellationToken cancellationToken) =>
-        await TcpUpstreamLink.ConnectAsync(host, port, cancellationToken);
+        await TcpUpstreamLink.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
 }
