@@ -1,0 +1,47 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (Release)
+        # The self-hosted runner is RAM-capped (8 GB — see the github-actions-runner-infra
+        # note); plain Release build is fine, but keep an eye on parallelism if heavier
+        # waves (R2R, the interop host) push memory.
+        run: dotnet build -c Release
+      - name: Test
+        run: dotnet test -c Release --no-build --filter "Category!=Interop"
+
+  interop:
+    # The oracle lane: the conversd-saupp container (docker/compose.oracle.yml), built from the
+    # vendored source, stands in as the upstream parent node. W0 proves it is reachable; later
+    # waves drive the composed host against it (the diff-oracle discipline — design.md decision 10).
+    runs-on: [self-hosted, Linux, X64]
+    # The oracle binds a fixed host port (3600) and one compose project, and the self-hosted box
+    # runs several runners — serialise.
+    concurrency:
+      group: pdnconvers-oracle-stack
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Oracle clean slate
+        run: docker compose -f docker/compose.oracle.yml down -v --remove-orphans || true
+      - name: Oracle up (healthcheck-gated)
+        run: docker compose -f docker/compose.oracle.yml up -d --build --wait
+      - name: Build (Release)
+        run: dotnet build -c Release
+      - name: Interop tests
+        run: dotnet test -c Release --no-build --filter "Category=Interop"
+      - name: Oracle logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker/compose.oracle.yml ps || true
+          docker compose -f docker/compose.oracle.yml logs --tail 100 || true
+      - name: Oracle down
+        if: always()
+        run: docker compose -f docker/compose.oracle.yml down -v --remove-orphans || true

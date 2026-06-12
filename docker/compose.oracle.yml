@@ -1,0 +1,31 @@
+# conversd-saupp oracle for pdn-convers (the Convers.Interop.Tests target).
+#
+# Builds the vendored DL9SAU conversd (reference/conversd-saupp) from source and runs ONE instance as
+# the stand-in upstream parent node — the convers network is a tree, and a leaf links to exactly one
+# parent (design.md decision 1). pdn-convers links in over the loopback-published port as a HOST;
+# interop tests connect as USERs.
+#
+# Stood up early (HANDOVER.md §6 step 5) so W4's HostLink can develop against a real conversd wire
+# before any live parent exists. The build context is the repo root so the Dockerfile can reach both
+# the vendored source and docker/oracle/.
+
+name: pdnconvers-oracle
+
+services:
+
+  conversd:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.conversd
+    container_name: pdnconvers-conversd
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3600:3600"   # the convers TCP port — our side of the upstream host link
+    healthcheck:
+      # debian-slim has bash but no curl/nc — probe the convers listener with bash's /dev/tcp
+      # builtin (the packet.net / pdn-bbs oracle pattern). Succeeds once conversd is accepting.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3600 && exec 3<&-"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s

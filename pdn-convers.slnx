@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Convers.Protocol/Convers.Protocol.csproj" />
+    <Project Path="src/Convers.Core/Convers.Core.csproj" />
+    <Project Path="src/Convers.Console/Convers.Console.csproj" />
+    <Project Path="src/Convers.Host/Convers.Host.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Convers.Protocol.Tests/Convers.Protocol.Tests.csproj" />
+    <Project Path="tests/Convers.Core.Tests/Convers.Core.Tests.csproj" />
+    <Project Path="tests/Convers.Console.Tests/Convers.Console.Tests.csproj" />
+    <Project Path="tests/Convers.Host.Tests/Convers.Host.Tests.csproj" />
+    <Project Path="tests/Convers.Interop.Tests/Convers.Interop.Tests.csproj" />
+  </Folder>
+</Solution>
