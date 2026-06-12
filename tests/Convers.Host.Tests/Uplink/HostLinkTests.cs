@@ -79,6 +79,29 @@ public class HostLinkTests
         }
     }
 
+    /// <summary>
+    /// Advances fake time in <paramref name="step"/>s until <paramref name="predicate"/> holds, yielding
+    /// real time between steps. A single <c>Time.Advance</c> can race the background
+    /// <see cref="HostLink.RunAsync"/> loop reaching its <c>Task.Delay(backoff, time)</c> await — under CPU
+    /// contention the advance fires before the delay registers, so the delay (set relative to the already-
+    /// advanced clock) never releases and the loop wedges. Poll-advancing closes that race: whenever the
+    /// loop does reach the delay, a later step releases it (mirrors pdn-bbs <c>HostHarness.AdvanceUntilAsync</c>).
+    /// </summary>
+    private static async Task AdvanceUntilAsync(FakeTimeProvider time, Func<bool> predicate, string what, TimeSpan step)
+    {
+        DateTime realDeadline = DateTime.UtcNow + Timeout;
+        while (!predicate())
+        {
+            if (DateTime.UtcNow > realDeadline)
+            {
+                throw new TimeoutException($"Timed out advancing until: {what}");
+            }
+
+            time.Advance(step);
+            await Task.Delay(10);
+        }
+    }
+
     [Fact]
     public async Task Handshake_SendsHostThenComesUp_OnOracleReply()
     {
@@ -189,7 +212,7 @@ public class HostLinkTests
 
         // The link is now down; advance past the initial backoff to let it redial the second link.
         await WaitUntilAsync(() => !h.Link.IsUp, "link marked down");
-        h.Time.Advance(TimeSpan.FromSeconds(2)); // past InitialBackoff (1s)
+        await AdvanceUntilAsync(h.Time, () => factory.ConnectAttempts >= 2, "redial after silence", TimeSpan.FromSeconds(1));
 
         // The second connection re-runs the handshake.
         string sent = await second.ReadSentAsync(Timeout);
@@ -214,7 +237,7 @@ public class HostLinkTests
         await WaitUntilAsync(() => first.Disposed, "first link disposed after hangup");
         await WaitUntilAsync(() => !h.Link.IsUp, "link marked down after hangup");
 
-        h.Time.Advance(TimeSpan.FromSeconds(2)); // past backoff
+        await AdvanceUntilAsync(h.Time, () => factory.ConnectAttempts >= 2, "redial after hangup", TimeSpan.FromSeconds(1));
         string sent = await second.ReadSentAsync(Timeout);
         Assert.IsType<HostHandshake>(HostCommandCodec.Parse(sent));
     }
@@ -240,7 +263,7 @@ public class HostLinkTests
         // Drop the link; reconnect.
         first.Close();
         await WaitUntilAsync(() => !h.Link.IsUp, "down after hangup");
-        h.Time.Advance(TimeSpan.FromSeconds(2));
+        await AdvanceUntilAsync(h.Time, () => factory.ConnectAttempts >= 2, "redial for replay", TimeSpan.FromSeconds(1));
         _ = await second.ReadSentAsync(Timeout); // the new handshake
         second.PushLine(OracleHandshake);
         await h.Link.WaitForUpAsync(new CancellationTokenSource(Timeout).Token);
@@ -263,7 +286,7 @@ public class HostLinkTests
 
         // First dial throws; the loop backs off (InitialBackoff = 1s) then redials.
         await WaitUntilAsync(() => factory.ConnectAttempts >= 1, "first (failing) dial attempted");
-        h.Time.Advance(TimeSpan.FromSeconds(2)); // past the backoff
+        await AdvanceUntilAsync(h.Time, () => factory.ConnectAttempts >= 2, "redial after failure", TimeSpan.FromSeconds(1));
 
         string sent = await oracle.ReadSentAsync(Timeout);
         Assert.IsType<HostHandshake>(HostCommandCodec.Parse(sent));
