@@ -6,8 +6,10 @@ namespace Convers.Core;
 /// <summary>
 /// The SQLite-backed convers store: the saupp differentiators that must survive a restart —
 /// per-user <b>personal text</b>, <b>nicknames</b> and <b>passwords</b>, and per-channel
-/// <b>topics</b> (design decision 7). Live channel/presence state is deliberately NOT here; it is
-/// in-memory in <see cref="ConversHub"/> and rebuilt from the uplink on reconnect.
+/// <b>topics</b> (design decision 7) — <b>plus an append-only <c>chatlog</c></b> recording every
+/// channel message (local and network origin), every private message, and every presence event,
+/// kept forever (no prune). Live channel/presence state is deliberately NOT here; it is in-memory
+/// in <see cref="ConversHub"/> and rebuilt from the uplink on reconnect.
 ///
 /// <para>One database file (path supplied by the Host — the package state dir), WAL journal mode,
 /// schema-versioned with an idempotent migration on open (the <see cref="BbsStore"/>-style
@@ -20,7 +22,13 @@ namespace Convers.Core;
 public sealed class ConversStore : IDisposable
 {
     /// <summary>The schema version this build writes and expects.</summary>
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
+
+    /// <summary>
+    /// The default cap on rows returned by <see cref="QueryChatLog"/> when the caller does not supply
+    /// one — a sane bound so the web tile's scrollback render is never handed an unbounded result.
+    /// </summary>
+    public const int DefaultChatLogLimit = 500;
 
     private readonly SqliteConnection _connection;
     private readonly TimeProvider _time;
@@ -246,6 +254,155 @@ public sealed class ConversStore : IDisposable
         }
     }
 
+    // ---------------------------------------------------------------- chat log
+
+    /// <summary>
+    /// Appends one row to the append-only, kept-forever <c>chatlog</c> (design decision 7). When the
+    /// entry's <see cref="ChatLogEntry.At"/> is left at <c>default</c> the store stamps it with the
+    /// current time from its injected <see cref="TimeProvider"/>. There is deliberately no prune/delete
+    /// counterpart — the log is retained indefinitely. Callsigns are stored in canonical form; the
+    /// payload <c>text</c> is stored verbatim. Returns the new row's id.
+    /// </summary>
+    public long AppendChatLog(ChatLogEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        ArgumentException.ThrowIfNullOrWhiteSpace(entry.FromCall, nameof(entry));
+
+        long utc = entry.At == default ? NowSeconds() : ToUnix(entry.At);
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(
+                "INSERT INTO chatlog(kind,utc,channel,from_call,to_call,origin,text) " +
+                "VALUES($k,$u,$ch,$from,$to,$o,$txt); SELECT last_insert_rowid();");
+            cmd.Parameters.AddWithValue("$k", (int)entry.Kind);
+            cmd.Parameters.AddWithValue("$u", utc);
+            cmd.Parameters.AddWithValue("$ch", (object?)entry.Channel ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$from", Callsigns.Normalize(entry.FromCall));
+            cmd.Parameters.AddWithValue("$to", string.IsNullOrEmpty(entry.ToCall) ? DBNull.Value : Callsigns.Normalize(entry.ToCall));
+            cmd.Parameters.AddWithValue("$o", (int)entry.Origin);
+            cmd.Parameters.AddWithValue("$txt", entry.Text ?? string.Empty);
+            return (long)cmd.ExecuteScalar()!;
+        }
+    }
+
+    /// <summary>
+    /// Reads back chat-log rows, <b>most-recent-first</b> (newest <c>utc</c>, then newest id), with the
+    /// filters all optional and combined with AND:
+    /// <list type="bullet">
+    /// <item><paramref name="channel"/> — only rows on that channel (a private message, whose channel is
+    /// null, never matches a channel filter).</item>
+    /// <item><paramref name="kind"/> — only that kind of row.</item>
+    /// <item><paramref name="sinceUtc"/> — only rows at or after that instant (inclusive).</item>
+    /// </list>
+    /// At most <paramref name="limit"/> rows are returned (defaulting to <see cref="DefaultChatLogLimit"/>;
+    /// a non-positive value is clamped to the default) — the web tile renders scrollback from the tail.
+    /// </summary>
+    public IReadOnlyList<ChatLogEntry> QueryChatLog(
+        int? channel = null,
+        ChatLogKind? kind = null,
+        DateTimeOffset? sinceUtc = null,
+        int? limit = null)
+    {
+        int cap = limit is > 0 ? limit.Value : DefaultChatLogLimit;
+
+        var sql = new System.Text.StringBuilder(
+            "SELECT kind,utc,channel,from_call,to_call,origin,text FROM chatlog WHERE 1=1");
+        if (channel is not null)
+        {
+            sql.Append(" AND channel=$ch");
+        }
+
+        if (kind is not null)
+        {
+            sql.Append(" AND kind=$k");
+        }
+
+        if (sinceUtc is not null)
+        {
+            sql.Append(" AND utc>=$since");
+        }
+
+        sql.Append(" ORDER BY utc DESC, id DESC LIMIT $lim;");
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(sql.ToString());
+            if (channel is not null)
+            {
+                cmd.Parameters.AddWithValue("$ch", channel.Value);
+            }
+
+            if (kind is not null)
+            {
+                cmd.Parameters.AddWithValue("$k", (int)kind.Value);
+            }
+
+            if (sinceUtc is not null)
+            {
+                cmd.Parameters.AddWithValue("$since", ToUnix(sinceUtc.Value));
+            }
+
+            cmd.Parameters.AddWithValue("$lim", cap);
+
+            using SqliteDataReader reader = cmd.ExecuteReader();
+            var rows = new List<ChatLogEntry>();
+            while (reader.Read())
+            {
+                rows.Add(ReadChatLog(reader));
+            }
+
+            return rows;
+        }
+    }
+
+    /// <summary>
+    /// Counts chat-log rows matching the same optional filters as <see cref="QueryChatLog"/>
+    /// (<paramref name="channel"/>, <paramref name="kind"/>, <paramref name="sinceUtc"/>, AND-combined).
+    /// No limit is applied — this is the full count of matching rows.
+    /// </summary>
+    public long CountChatLog(int? channel = null, ChatLogKind? kind = null, DateTimeOffset? sinceUtc = null)
+    {
+        var sql = new System.Text.StringBuilder("SELECT COUNT(*) FROM chatlog WHERE 1=1");
+        if (channel is not null)
+        {
+            sql.Append(" AND channel=$ch");
+        }
+
+        if (kind is not null)
+        {
+            sql.Append(" AND kind=$k");
+        }
+
+        if (sinceUtc is not null)
+        {
+            sql.Append(" AND utc>=$since");
+        }
+
+        sql.Append(';');
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(sql.ToString());
+            if (channel is not null)
+            {
+                cmd.Parameters.AddWithValue("$ch", channel.Value);
+            }
+
+            if (kind is not null)
+            {
+                cmd.Parameters.AddWithValue("$k", (int)kind.Value);
+            }
+
+            if (sinceUtc is not null)
+            {
+                cmd.Parameters.AddWithValue("$since", ToUnix(sinceUtc.Value));
+            }
+
+            return (long)cmd.ExecuteScalar()!;
+        }
+    }
+
     // ---------------------------------------------------------------- plumbing
 
     internal long NowSeconds() => _time.GetUtcNow().ToUnixTimeSeconds();
@@ -282,6 +439,18 @@ public sealed class ConversStore : IDisposable
         Topic = reader.GetString(1),
         SetBy = reader.GetString(2),
         SetAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(3)),
+    };
+
+    // Column order: kind,utc,channel,from_call,to_call,origin,text
+    private static ChatLogEntry ReadChatLog(SqliteDataReader reader) => new()
+    {
+        Kind = (ChatLogKind)reader.GetInt64(0),
+        At = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(1)),
+        Channel = reader.IsDBNull(2) ? null : (int)reader.GetInt64(2),
+        FromCall = reader.GetString(3),
+        ToCall = reader.IsDBNull(4) ? null : reader.GetString(4),
+        Origin = (ChatLogOrigin)reader.GetInt64(5),
+        Text = reader.GetString(6),
     };
 
     private static int Migrate(SqliteConnection connection)
@@ -324,6 +493,31 @@ public sealed class ConversStore : IDisposable
             version = 1;
         }
 
+        // v2 — the append-only chat log (design decision 7). PURELY ADDITIVE: a single new `chatlog`
+        // table plus its read indexes, created alongside the existing profiles + topics. No existing
+        // v1 column or row is touched or rewritten, so applying this to a populated v1 database
+        // preserves all persisted profiles and topics. Kept forever — there is no prune.
+        if (version < 2)
+        {
+            using SqliteTransaction tx = connection.BeginTransaction();
+            using (SqliteCommand ddl = connection.CreateCommand())
+            {
+                ddl.Transaction = tx;
+                ddl.CommandText = SchemaV2;
+                ddl.ExecuteNonQuery();
+            }
+
+            using (SqliteCommand stamp = connection.CreateCommand())
+            {
+                stamp.Transaction = tx;
+                stamp.CommandText = "UPDATE meta SET value='2' WHERE key='schema_version';";
+                stamp.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            version = 2;
+        }
+
         return version;
     }
 
@@ -342,5 +536,21 @@ public sealed class ConversStore : IDisposable
             set_by   TEXT NOT NULL DEFAULT '',
             set_utc  INTEGER NOT NULL DEFAULT 0
         ) WITHOUT ROWID;
+        """;
+
+    private const string SchemaV2 = """
+        CREATE TABLE chatlog(
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind      INTEGER NOT NULL,
+            utc       INTEGER NOT NULL,
+            channel   INTEGER,
+            from_call TEXT NOT NULL,
+            to_call   TEXT,
+            origin    INTEGER NOT NULL,
+            text      TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX idx_chatlog_utc ON chatlog(utc);
+        CREATE INDEX idx_chatlog_channel_utc ON chatlog(channel, utc);
+        CREATE INDEX idx_chatlog_kind_utc ON chatlog(kind, utc);
         """;
 }
