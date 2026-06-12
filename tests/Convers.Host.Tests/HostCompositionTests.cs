@@ -116,18 +116,9 @@ internal sealed class ComposedHost : IAsyncDisposable
             {uplinkYaml}
             """);
 
-        // HostComposition.Build reads PDN_APP_STATE synchronously; restore straight after.
-        string? previous = Environment.GetEnvironmentVariable("PDN_APP_STATE");
-        WebApplication app;
-        try
-        {
-            Environment.SetEnvironmentVariable("PDN_APP_STATE", dir.FullName);
-            app = HostComposition.Build([]);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("PDN_APP_STATE", previous);
-        }
+        // Pass the state dir explicitly so parallel composed-host tests never race on the process-global
+        // PDN_APP_STATE env var (that race made two hosts open one convers.db → SQLite "disk I/O error").
+        WebApplication app = HostComposition.Build([], dir.FullName);
 
         var host = new ComposedHost(server, app, dir, start);
         if (start)

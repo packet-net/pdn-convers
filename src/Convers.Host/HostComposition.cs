@@ -31,13 +31,20 @@ public static class HostComposition
     /// falls back to <c>PDN_RHP_HOST</c>/<c>PDN_RHP_PORT</c>. The caller owns the returned app (<c>Run</c>
     /// in Program, <c>StartAsync</c>/<c>DisposeAsync</c> in tests).
     /// </summary>
-    public static WebApplication Build(string[] args)
+    /// <param name="args">Command-line arguments for the web host builder.</param>
+    /// <param name="stateDirectory">
+    /// Explicit state directory; when null (production), falls back to <c>$PDN_APP_STATE</c> then the cwd.
+    /// Tests pass it directly so parallel composed-host builds never race on the process-global env var.
+    /// </param>
+    public static WebApplication Build(string[] args, string? stateDirectory = null)
     {
         var builder = WebApplication.CreateBuilder(args);
 
-        string stateDir = Environment.GetEnvironmentVariable("PDN_APP_STATE") is { Length: > 0 } s
-            ? s
-            : Directory.GetCurrentDirectory();
+        string stateDir = stateDirectory is { Length: > 0 } sd
+            ? sd
+            : Environment.GetEnvironmentVariable("PDN_APP_STATE") is { Length: > 0 } s
+                ? s
+                : Directory.GetCurrentDirectory();
         Directory.CreateDirectory(stateDir);
 
         (ConversHostConfig config, bool createdDefault) =
