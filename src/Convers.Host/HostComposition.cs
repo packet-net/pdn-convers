@@ -5,6 +5,7 @@ using Convers.Core;
 using Convers.Host.Rhp;
 using Convers.Host.Sessions;
 using Convers.Host.Uplink;
+using Convers.Host.Web;
 using Convers.Protocol;
 
 namespace Convers.Host;
@@ -124,6 +125,15 @@ public static class HostComposition
             sessionConfig,
             sp.GetRequiredService<ILogger<InboundDemux>>()));
 
+        // W5b — the web chat tile's local-session seam: web users join the same channels as RF users
+        // (design decision 8), bridged to the shared hub through the SAME HostLink the RF sessions use.
+        builder.Services.AddSingleton(sp => new WebChatSessions(
+            sp.GetRequiredService<HostLink>(),
+            sp.GetRequiredService<LocalSessionRegistry>(),
+            sp.GetRequiredService<ChatLogWriter>(),
+            time,
+            config.DefaultChannel));
+
         // One ComponentService<T> per loop — distinct closed generics so AddHostedService (which
         // de-duplicates by implementation type) registers every loop. A single non-generic component
         // service would collapse to the first registration (the pdn-bbs footgun; pinned by tests).
@@ -138,6 +148,16 @@ public static class HostComposition
 
         // Liveness for scripts/deploy-convers.sh and the node supervisor.
         app.MapGet("/healthz", () => Results.Text("ok"));
+
+        // W5b — the web chat tile (pdn-bbs webmail style): server-rendered, gateway identity is the auth
+        // boundary (no second login), web users are local sessions joining the same channels as RF users.
+        WebChat.Map(app, new WebChatOptions
+        {
+            Sessions = app.Services.GetRequiredService<WebChatSessions>(),
+            Store = store,
+            NodeCallsign = callsign,
+            DefaultChannel = config.DefaultChannel,
+        });
 
         var log = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Convers.Host");
         if (createdDefault)
