@@ -19,7 +19,8 @@ public class ConversHostConfigTests
 
             Assert.True(created);
             Assert.True(File.Exists(path));
-            Assert.Equal(ConversHostConfig.PlaceholderCallsign, config.Callsign);
+            Assert.Equal("", config.Callsign);   // blank by default — derived from the node, not hand-set
+            Assert.Equal(ConversIdentity.DefaultSsid, config.Ssid);
             Assert.Equal(ConversHostConfig.PlaceholderDefaultChannel, config.DefaultChannel);
             Assert.Equal(18091, config.Web.Port);
 
@@ -38,7 +39,8 @@ public class ConversHostConfigTests
     {
         ConversHostConfig config = ConversHostConfigFile.Parse(ConversHostConfigFile.DefaultYaml);
 
-        Assert.Equal("N0CALL", config.Callsign);
+        Assert.Equal("", config.Callsign);      // blank — auto-derived from PDN_NODE_CALLSIGN
+        Assert.Equal(4, config.Ssid);
         Assert.Equal(3333, config.DefaultChannel);
         Assert.Equal("127.0.0.1", config.Web.Bind);
         Assert.Null(config.Uplink.Provider);    // no parent yet — uplink unset

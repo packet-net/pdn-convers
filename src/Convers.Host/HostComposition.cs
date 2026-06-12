@@ -32,6 +32,13 @@ public static class HostComposition
         (ConversHostConfig config, bool createdDefault) =
             ConversHostConfigFile.LoadOrCreate(stateDir, Environment.GetEnvironmentVariable);
 
+        // Auto-derive the on-air callsign from the node (pdn convention: an app lives at an SSID of
+        // the node callsign — <node-callsign>-<ssid>). An explicit config callsign wins verbatim.
+        // W5's RHP bind probe-walks to the next free SSID if this one is taken.
+        string? nodeCallsign = Environment.GetEnvironmentVariable("PDN_NODE_CALLSIGN");
+        (string callsign, bool placeholderIdentity) =
+            ConversIdentity.Resolve(config.Callsign, nodeCallsign, config.Ssid);
+
         string version = typeof(HostComposition).Assembly
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion is { Length: > 0 } iv
             ? iv.Split('+')[0]
@@ -54,12 +61,12 @@ public static class HostComposition
             log.CreatedDefaultConfig(Path.Combine(stateDir, ConversHostConfigFile.FileName));
         }
 
-        if (string.Equals(config.Callsign, ConversHostConfig.PlaceholderCallsign, StringComparison.OrdinalIgnoreCase))
+        if (placeholderIdentity)
         {
             log.PlaceholderCallsign(ConversHostConfigFile.FileName);
         }
 
-        log.Starting(version, config.Callsign, config.DefaultChannel, config.Web.Bind, config.Web.Port);
+        log.Starting(version, callsign, config.DefaultChannel, config.Web.Bind, config.Web.Port);
         return app;
     }
 }
@@ -72,7 +79,8 @@ internal static partial class ProgramLog
     public static partial void CreatedDefaultConfig(this ILogger logger, string path);
 
     [LoggerMessage(EventId = 2, Level = LogLevel.Warning,
-        Message = "The convers callsign is still the N0CALL placeholder — set callsign in {File}")]
+        Message = "No node callsign (PDN_NODE_CALLSIGN) and no callsign override — using a setup "
+            + "placeholder identity; run under a pdn node, or set callsign in {File}")]
     public static partial void PlaceholderCallsign(this ILogger logger, string file);
 
     [LoggerMessage(EventId = 3, Level = LogLevel.Information,

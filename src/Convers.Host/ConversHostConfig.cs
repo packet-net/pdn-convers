@@ -14,14 +14,18 @@ namespace Convers.Host;
 /// </remarks>
 public sealed record ConversHostConfig
 {
-    /// <summary>The callsign placeholder a fresh default config carries until the owner edits it.</summary>
-    public const string PlaceholderCallsign = "N0CALL";
-
     /// <summary>The shipped placeholder default channel — Tom picks the real public number before go-live.</summary>
     public const int PlaceholderDefaultChannel = 3333;
 
-    /// <summary>Convers node callsign (+ optional SSID) — the RHP bind identity.</summary>
-    public string Callsign { get; init; } = PlaceholderCallsign;
+    /// <summary>
+    /// Explicit callsign override. Normally <b>blank</b> — the callsign is derived automatically from
+    /// the node (<see cref="ConversIdentity"/>: <c>&lt;node-callsign&gt;-&lt;ssid&gt;</c>). Set this only
+    /// to force a specific callsign, which then wins verbatim (including any SSID).
+    /// </summary>
+    public string Callsign { get; init; } = "";
+
+    /// <summary>Preferred SSID (0–15) for the auto-derived callsign; ignored when <see cref="Callsign"/> is set.</summary>
+    public int Ssid { get; init; } = ConversIdentity.DefaultSsid;
 
     /// <summary>Sysop callsign (console sysop rights; sysop view in the web tile).</summary>
     public string Sysop { get; init; } = "";
@@ -170,10 +174,15 @@ public static class ConversHostConfigFile
     public const string DefaultYaml = """
         # pdn-convers configuration — created on first run; edit and restart the app.
         #
-        # callsign: the convers node callsign (+ optional SSID). This is the callsign the node
-        #           binds over RHPv2 — RF users connect to it and it is the identity presented to
-        #           the upstream convers network.
-        callsign: N0CALL
+        # callsign: USUALLY LEAVE BLANK. pdn-convers derives its on-air callsign automatically from
+        #           the node it runs under — the pdn convention is that an app lives at an SSID of the
+        #           node callsign, so the callsign is <node-callsign>-<ssid>, probe-walking to the next
+        #           free SSID if that one is already taken. Set this ONLY to force a specific callsign;
+        #           it then wins verbatim (including any SSID you put here).
+        callsign: ""
+
+        # ssid: preferred SSID (0-15) for the auto-derived callsign. Ignored when callsign is set above.
+        ssid: 4
 
         # sysop: the sysop's callsign (sysop rights on the console; sysop view in the web tile).
         sysop: ""

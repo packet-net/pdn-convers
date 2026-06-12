@@ -6,3 +6,6 @@ obj/
 
 # .deb publish + staging output (scripts/build-deb.sh)
 artifacts/
+
+# Claude Code local state (agent worktrees etc.)
+.claude/
