@@ -135,6 +135,14 @@ public class HostLinkTests
         oracle.PushLine(OracleHandshake);
         await h.Link.WaitForUpAsync(new CancellationTokenSource(Timeout).Token);
 
+        // Wait until the queued LocalJoin has actually been applied (announced upstream as a /..USER)
+        // before pushing the inbound CMSG — otherwise, under load, the CMSG can be processed before the
+        // join drains off the local-event queue, so the hub doesn't yet know s1 is on 3333 (the same
+        // latent race fixed in InboundMode; the product is fine, the test just raced).
+        await WaitUntilAsync(
+            () => oracle.SentLines.Any(l => HostCommandCodec.Parse(l) is HostUser { User: "M0LTE", ToChannel: 3333 }),
+            "local join applied (announced upstream)");
+
         // The network sends a channel message; it must reach the local session.
         oracle.PushLine(Wire.Host("CMSG g4abc 3333 hello leaf"));
 
