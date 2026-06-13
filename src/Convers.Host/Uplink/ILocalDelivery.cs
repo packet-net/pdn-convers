@@ -64,3 +64,47 @@ public sealed class NullInboundObserver : IInboundObserver
         // intentionally nothing
     }
 }
+
+/// <summary>
+/// Observes every <em>local-origin</em> <see cref="ConversEvent"/> the <see cref="HostLink"/> applies to
+/// the hub — the other half of the chat-log feed (a local RF/web user's say / PM / join / leave / away).
+/// The link resolves the speaker's callsign and channel from the hub on its owning loop (the events carry
+/// a session id, not a callsign) and passes them in, so logging is centralised at the one fan-out point
+/// and never duplicated or bypassed (design decision 7). The default is a no-op.
+/// </summary>
+public interface ILocalEventObserver
+{
+    /// <summary>
+    /// True when <paramref name="localEvent"/> is one this observer cares about, so the link only does the
+    /// (loop-bound) identity resolution when there is something to log.
+    /// </summary>
+    bool IsLoggable(ConversEvent localEvent);
+
+    /// <summary>
+    /// Called for each loggable local-origin event after the hub has applied it, with the speaker's
+    /// resolved callsign and channel and the <paramref name="actions"/> the hub fanned out. The actions
+    /// tell the observer whether the event was actually accepted (a say/join refused by a channel-mode rule
+    /// produces only a notice and no Send/Deliver), so a refused action is not mis-logged.
+    /// </summary>
+    void OnLocal(ConversEvent localEvent, string fromCall, int channel, IReadOnlyList<ConversAction> actions);
+}
+
+/// <summary>A no-op <see cref="ILocalEventObserver"/> — the default when no local observer is wired.</summary>
+public sealed class NullLocalEventObserver : ILocalEventObserver
+{
+    /// <summary>The shared instance.</summary>
+    public static readonly NullLocalEventObserver Instance = new();
+
+    private NullLocalEventObserver()
+    {
+    }
+
+    /// <inheritdoc/>
+    public bool IsLoggable(ConversEvent localEvent) => false;
+
+    /// <inheritdoc/>
+    public void OnLocal(ConversEvent localEvent, string fromCall, int channel, IReadOnlyList<ConversAction> actions)
+    {
+        // intentionally nothing
+    }
+}

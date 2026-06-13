@@ -33,6 +33,10 @@ public static class ClassicCommands
         new("write",    "wr",     "msg"),    // /WRite user text
         new("query",    "que",    "msg"),    // /QUEry user (we map to a one-shot msg target form via args)
         new("topic",    "to",     "topic"),  // /TOpic [text]
+        new("mode",     "mo",     "mode"),   // /MOde [#channel] options — set/show channel modes
+        new("oper",     "op",     "oper"),   // /OPerator [secret] — become operator
+        new("operator", "op",     "oper"),   // /OPerator [secret] (full spelling)
+        new("sysop",    "sy",     "oper"),   // /SYsOp [secret] — become operator (alias)
         new("who",      "wh",     "who"),    // /Who [...]
         new("users",    "u",      "who"),    // /USers [...]
         new("online",   "o",      "who"),    // /ONline

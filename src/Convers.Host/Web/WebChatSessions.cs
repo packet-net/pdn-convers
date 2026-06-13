@@ -20,7 +20,8 @@ namespace Convers.Host.Web;
 /// lazily on the user's first mutating action (or first channel view) and kept joined so RF users keep
 /// seeing the web user. Every mutation (<c>say</c> / <c>join</c> / <c>topic</c> / <c>msg</c> / <c>away</c>)
 /// is submitted through <see cref="HostLink.SubmitLocalEventAsync"/> — the SAME hub seam RF users use —
-/// and chat-logged through <see cref="ChatLogWriter"/>, exactly mirroring <see cref="RfUserSession"/>.
+/// and chat logging is centralised at that link's fan-out (design decision 7), so a web user's chat is
+/// logged exactly once, with no per-session call to bypass, mirroring <see cref="RfUserSession"/>.
 /// </para>
 /// <para>
 /// A web user's inbound deliveries (other people's messages) are rendered from the durable chat log
@@ -38,9 +39,9 @@ public sealed class WebChatSessions : IAsyncDisposable
 
     private readonly HostLink _link;
     private readonly LocalSessionRegistry _registry;
-    private readonly ChatLogWriter? _chatLog;
     private readonly TimeProvider _time;
     private readonly int _defaultChannel;
+    private readonly string _operatorSecret;
 
     // One live session per callsign. Keyed on the canonical callsign so case never splits a user.
     private readonly ConcurrentDictionary<string, WebSession> _sessions = new(StringComparer.Ordinal);
@@ -49,18 +50,18 @@ public sealed class WebChatSessions : IAsyncDisposable
     public WebChatSessions(
         HostLink link,
         LocalSessionRegistry registry,
-        ChatLogWriter? chatLog,
         TimeProvider timeProvider,
-        int defaultChannel)
+        int defaultChannel,
+        string operatorSecret = "")
     {
         ArgumentNullException.ThrowIfNull(link);
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(timeProvider);
         _link = link;
         _registry = registry;
-        _chatLog = chatLog;
         _time = timeProvider;
         _defaultChannel = defaultChannel;
+        _operatorSecret = operatorSecret ?? "";
     }
 
     /// <summary>The number of live web sessions (diagnostics / tests).</summary>
@@ -88,12 +89,12 @@ public sealed class WebChatSessions : IAsyncDisposable
     /// A read-only snapshot of a channel's live presence and topic, taken on the hub's owning loop via the
     /// link seam (the hub is never read off-loop — design decision 2). Used by the channel view.
     /// </summary>
-    public ValueTask<(IReadOnlyList<NetworkUser> Present, string Topic, string TopicBy)> SnapshotChannelAsync(
+    public ValueTask<(IReadOnlyList<NetworkUser> Present, string Topic, string TopicBy, ChannelMode Modes)> SnapshotChannelAsync(
         int channel, CancellationToken cancellationToken) =>
         _link.SnapshotAsync(hub =>
         {
             Channel ch = hub.GetChannel(channel);
-            return ((IReadOnlyList<NetworkUser>)ch.Users, ch.Topic, ch.TopicSetBy);
+            return ((IReadOnlyList<NetworkUser>)ch.Users, ch.Topic, ch.TopicSetBy, ch.Modes);
         }, cancellationToken);
 
     /// <summary>
@@ -116,7 +117,7 @@ public sealed class WebChatSessions : IAsyncDisposable
             hub => hub.GetSession(session.Id)?.Channel ?? session.Channel, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Says <paramref name="text"/> to the user's current channel (fans out to RF + web, logs, goes upstream).</summary>
+    /// <summary>Says <paramref name="text"/> to the user's current channel (fans out to RF + web, goes upstream).</summary>
     public async ValueTask SayAsync(string callsign, string text, CancellationToken cancellationToken)
     {
         if (text.Length == 0)
@@ -125,10 +126,7 @@ public sealed class WebChatSessions : IAsyncDisposable
         }
 
         WebSession session = await GetOrCreateAsync(callsign, cancellationToken).ConfigureAwait(false);
-        int channel = await _link.SnapshotAsync(
-            hub => hub.GetSession(session.Id)?.Channel ?? session.Channel, cancellationToken).ConfigureAwait(false);
         await _link.SubmitLocalEventAsync(new ConversEvent.LocalSay(session.Id, text), cancellationToken).ConfigureAwait(false);
-        _chatLog?.LocalChannel(session.Callsign, channel, text);
     }
 
     /// <summary>Switches the user to <paramref name="channel"/> (joining it like an RF <c>join</c>).</summary>
@@ -143,10 +141,9 @@ public sealed class WebChatSessions : IAsyncDisposable
         await _link.SubmitLocalEventAsync(
             new ConversEvent.LocalSwitchChannel(session.Id, channel), cancellationToken).ConfigureAwait(false);
         session.Channel = channel;
-        _chatLog?.LocalPresence(session.Callsign, channel, "joined");
     }
 
-    /// <summary>Sets the topic of the user's current channel.</summary>
+    /// <summary>Sets the topic of the user's current channel (the hub enforces <c>+t</c> for non-operators).</summary>
     public async ValueTask SetTopicAsync(string callsign, string topic, CancellationToken cancellationToken)
     {
         WebSession session = await GetOrCreateAsync(callsign, cancellationToken).ConfigureAwait(false);
@@ -165,20 +162,69 @@ public sealed class WebChatSessions : IAsyncDisposable
         WebSession session = await GetOrCreateAsync(callsign, cancellationToken).ConfigureAwait(false);
         await _link.SubmitLocalEventAsync(
             new ConversEvent.LocalPrivateMessage(session.Id, toUser, text), cancellationToken).ConfigureAwait(false);
-        _chatLog?.LocalPrivate(session.Callsign, toUser, text);
+    }
+
+    /// <summary>
+    /// Sets the modes of the user's current channel (the hub enforces operator status; a non-operator's
+    /// request is refused). <paramref name="options"/> is the verbatim toggle string (e.g. <c>+mt</c>).
+    /// </summary>
+    public async ValueTask SetModeAsync(string callsign, string options, CancellationToken cancellationToken)
+    {
+        if (options.Trim().Length == 0)
+        {
+            return;
+        }
+
+        WebSession session = await GetOrCreateAsync(callsign, cancellationToken).ConfigureAwait(false);
+        int channel = await _link.SnapshotAsync(
+            hub => hub.GetSession(session.Id)?.Channel ?? session.Channel, cancellationToken).ConfigureAwait(false);
+        await _link.SubmitLocalEventAsync(
+            new ConversEvent.LocalSetMode(session.Id, channel, options.Trim()), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Operator login for a web user (<c>/..OPER</c> semantics): grants operator status when
+    /// <paramref name="secret"/> matches the node operator secret. Returns true on success. A blank
+    /// configured secret disables operator login entirely (conversd <c>SecretNum 0</c>).
+    /// </summary>
+    public async ValueTask<bool> TryOperAsync(string callsign, string secret, CancellationToken cancellationToken)
+    {
+        if (_operatorSecret.Length == 0 || !FixedTimeEquals(secret, _operatorSecret))
+        {
+            return false;
+        }
+
+        WebSession session = await GetOrCreateAsync(callsign, cancellationToken).ConfigureAwait(false);
+        await _link.SubmitLocalEventAsync(
+            new ConversEvent.LocalSetOperator(session.Id, -1, true), cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>True when the web user currently has operator status (read from the live hub session).</summary>
+    public async ValueTask<bool> IsOperatorAsync(string callsign, CancellationToken cancellationToken)
+    {
+        string call = Callsigns.Normalize(callsign);
+        if (!_sessions.TryGetValue(call, out WebSession? session))
+        {
+            return false;
+        }
+
+        return await _link.SnapshotAsync(
+            hub => hub.GetSession(session.Id)?.IsOperator ?? false, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Sets (empty clears) the web user's away message.</summary>
     public async ValueTask SetAwayAsync(string callsign, string away, CancellationToken cancellationToken)
     {
         WebSession session = await GetOrCreateAsync(callsign, cancellationToken).ConfigureAwait(false);
-        int channel = await _link.SnapshotAsync(
-            hub => hub.GetSession(session.Id)?.Channel ?? session.Channel, cancellationToken).ConfigureAwait(false);
         await _link.SubmitLocalEventAsync(
             new ConversEvent.LocalSetAway(session.Id, away), cancellationToken).ConfigureAwait(false);
-        _chatLog?.LocalPresence(session.Callsign, channel,
-            away.Trim().Length == 0 ? "back" : $"away: {away.Trim()}");
     }
+
+    /// <summary>Constant-time secret comparison so the operator secret cannot be guessed by timing.</summary>
+    private static bool FixedTimeEquals(string a, string b) =>
+        System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.UTF8.GetBytes(a), System.Text.Encoding.UTF8.GetBytes(b));
 
     private async ValueTask<WebSession> GetOrCreateAsync(string callsign, CancellationToken cancellationToken)
     {
@@ -205,7 +251,6 @@ public sealed class WebChatSessions : IAsyncDisposable
         _registry.Register(session.Id, session.WriteLineAsync);
         await _link.SubmitLocalEventAsync(
             new ConversEvent.LocalJoin(session.Id, call, _defaultChannel), cancellationToken).ConfigureAwait(false);
-        _chatLog?.LocalPresence(call, _defaultChannel, "joined");
         return session;
     }
 
@@ -230,7 +275,6 @@ public sealed class WebChatSessions : IAsyncDisposable
         {
             await _link.SubmitLocalEventAsync(
                 new ConversEvent.LocalLeave(session.Id, reason), cancellationToken).ConfigureAwait(false);
-            _chatLog?.LocalPresence(session.Callsign, session.Channel, $"left: {reason}");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

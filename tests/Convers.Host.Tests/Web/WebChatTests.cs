@@ -28,6 +28,7 @@ namespace Convers.Host.Tests.Web;
 public sealed class WebChatTests : IAsyncDisposable
 {
     private const int DefaultChannel = 3333;
+    private const string OperatorSecret = "letmein";
 
     private readonly DirectoryInfo _dir;
     private readonly ConversStore _store;
@@ -48,9 +49,9 @@ public sealed class WebChatTests : IAsyncDisposable
         var chatLog = new ChatLogWriter(_store, NullLogger<ChatLogWriter>.Instance);
         var options = new HostLinkOptions { HostName = "G0WEB" };
         _link = new HostLink(options, NullUpstreamLinkFactory.Instance, _hub, time,
-            NullLogger<HostLink>.Instance, _registry, chatLog);
+            NullLogger<HostLink>.Instance, _registry, chatLog, chatLog);
         _linkRun = _link.RunAsync(_cts.Token);
-        _sessions = new WebChatSessions(_link, _registry, chatLog, time, DefaultChannel);
+        _sessions = new WebChatSessions(_link, _registry, time, DefaultChannel, OperatorSecret);
     }
 
     public async ValueTask DisposeAsync()
@@ -338,6 +339,80 @@ public sealed class WebChatTests : IAsyncDisposable
             return names.Contains("M0LTE") && names.Contains("G4ABC");
         }, CancellationToken.None);
         Assert.True(bothPresent);
+    }
+
+    // ---------------------------------------------------------------- W7b: modes + away + operator
+
+    [Fact]
+    public async Task ChannelView_ShowsModeLine_AndOperatorLoginForANonOperator()
+    {
+        using HttpClient client = await StartAsync();
+        string page = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+
+        Assert.Contains("Modes:", page, StringComparison.Ordinal);
+        Assert.Contains("no modes set", page, StringComparison.Ordinal);
+        // A non-operator is offered the operator-login box (not the mode-set box).
+        Assert.Contains("action=\"/oper\"", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("action=\"/mode\"", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Away_SetsAndShowsTheWebUserAsAway()
+    {
+        using HttpClient client = await StartAsync();
+        await client.GetStringAsync(new Uri("/", UriKind.Relative));
+
+        HttpResponseMessage away = await client.PostAsync(
+            new Uri("/away", UriKind.Relative),
+            new FormUrlEncodedContent([new KeyValuePair<string, string>("text", "lunch")]));
+        away.EnsureSuccessStatusCode();
+
+        await PollUntilAsync(async () => await _link.SnapshotAsync(
+            hub => hub.GetChannel(3333).Users.Any(u => u.Name == "M0LTE" && u.IsAway), CancellationToken.None));
+
+        string page = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+        Assert.Contains("(away)", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OperatorLogin_WithCorrectSecret_GrantsModeControl_AndCanSetModes()
+    {
+        using HttpClient client = await StartAsync();
+        await client.GetStringAsync(new Uri("/", UriKind.Relative)); // join
+
+        // Correct secret → operator; the page now offers the mode-set box, not the oper-login box.
+        HttpResponseMessage oper = await client.PostAsync(
+            new Uri("/oper", UriKind.Relative),
+            new FormUrlEncodedContent([new KeyValuePair<string, string>("secret", OperatorSecret)]));
+        oper.EnsureSuccessStatusCode();
+
+        await PollUntilAsync(() => _sessions.IsOperatorAsync("M0LTE", CancellationToken.None).AsTask());
+
+        string page = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+        Assert.Contains("You are an operator.", page, StringComparison.Ordinal);
+        Assert.Contains("action=\"/mode\"", page, StringComparison.Ordinal);
+
+        // As an operator, a mode-set takes effect.
+        await client.PostAsync(new Uri("/mode", UriKind.Relative),
+            new FormUrlEncodedContent([new KeyValuePair<string, string>("options", "+m")]));
+        await PollUntilAsync(async () => await _link.SnapshotAsync(
+            hub => (hub.GetChannel(3333).Modes & ChannelMode.Moderated) != 0, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task OperatorLogin_WithWrongSecret_IsDenied()
+    {
+        using HttpClient client = await StartAsync(autoRedirect: false);
+        await client.GetStringAsync(new Uri("/", UriKind.Relative));
+
+        HttpResponseMessage oper = await client.PostAsync(
+            new Uri("/oper", UriKind.Relative),
+            new FormUrlEncodedContent([new KeyValuePair<string, string>("secret", "wrong")]));
+        Assert.Equal(HttpStatusCode.Found, oper.StatusCode);
+        Assert.Contains("oper=fail", oper.Headers.Location!.OriginalString, StringComparison.Ordinal);
+
+        bool isOp = await _sessions.IsOperatorAsync("M0LTE", CancellationToken.None);
+        Assert.False(isOp);
     }
 
     // ---------------------------------------------------------------- X-Forwarded-Prefix (gateway mount)

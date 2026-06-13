@@ -27,18 +27,16 @@ public sealed class InboundDemux
     private readonly HostLink _hostLink;
     private readonly LocalSessionRegistry _registry;
     private readonly IConsolePreferences _preferences;
-    private readonly ChatLogWriter? _chatLog;
     private readonly RfSessionConfig _baseConfig;
     private readonly ILogger _logger;
     private int _nextSession;
 
-    /// <summary>Creates the demux.</summary>
+    /// <summary>Creates the demux. Chat logging is centralised at the <see cref="HostLink"/> fan-out, not here.</summary>
     public InboundDemux(
         RhpNodeLink link,
         HostLink hostLink,
         LocalSessionRegistry registry,
         IConsolePreferences preferences,
-        ChatLogWriter? chatLog,
         RfSessionConfig baseConfig,
         ILogger<InboundDemux> logger)
     {
@@ -52,7 +50,6 @@ public sealed class InboundDemux
         _hostLink = hostLink;
         _registry = registry;
         _preferences = preferences;
-        _chatLog = chatLog;
         _baseConfig = baseConfig;
         _logger = logger;
     }
@@ -89,7 +86,7 @@ public sealed class InboundDemux
 
             LogSession(_logger, child.RemoteCallsign, surface.ToString(), sessionId, null);
             await RfUserSession.RunAsync(
-                terminal, _hostLink, _registry, _chatLog, config, sessionId, cancellationToken).ConfigureAwait(false);
+                terminal, _hostLink, _registry, config, sessionId, cancellationToken).ConfigureAwait(false);
 
             await child.CloseAsync(CancellationToken.None).ConfigureAwait(false);
         }

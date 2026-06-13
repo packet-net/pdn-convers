@@ -22,6 +22,7 @@ internal sealed class DemuxHarness : IAsyncDisposable
     public const string NodeCall = "M0LTE-4";
     public const string HostName = "M0LTE";
     public const int DefaultChannel = 3333;
+    public const string OperatorSecret = "letmein";
 
     private readonly CancellationTokenSource _cts = new();
     private readonly List<Task> _loops = [];
@@ -53,6 +54,7 @@ internal sealed class DemuxHarness : IAsyncDisposable
             Time,
             NullLogger<HostLink>.Instance,
             Registry,
+            ChatLog,
             ChatLog);
 
         Node = new RhpNodeLink(
@@ -65,8 +67,10 @@ internal sealed class DemuxHarness : IAsyncDisposable
             Link,
             Registry,
             preferences ?? new FixedPreferences(ConsoleInterface.Plain),
-            ChatLog,
-            new RfSessionConfig { NodeName = HostName, DefaultChannel = DefaultChannel, PageLength = 0 },
+            new RfSessionConfig
+            {
+                NodeName = HostName, DefaultChannel = DefaultChannel, PageLength = 0, OperatorSecret = OperatorSecret,
+            },
             NullLogger<InboundDemux>.Instance);
 
         _loops.Add(Node.RunAsync(_cts.Token));

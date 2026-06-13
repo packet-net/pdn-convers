@@ -34,7 +34,6 @@ public sealed class RfUserSession
     private readonly IConverseTerminal _terminal;
     private readonly HostLink _link;
     private readonly LocalSessionRegistry _registry;
-    private readonly ChatLogWriter? _chatLog;
     private readonly RfSessionConfig _config;
     private readonly string _sessionId;
     private readonly string _call;
@@ -43,14 +42,12 @@ public sealed class RfUserSession
         IConverseTerminal terminal,
         HostLink link,
         LocalSessionRegistry registry,
-        ChatLogWriter? chatLog,
         RfSessionConfig config,
         string sessionId)
     {
         _terminal = terminal;
         _link = link;
         _registry = registry;
-        _chatLog = chatLog;
         _config = config;
         _sessionId = sessionId;
         _call = Callsigns.Normalize(terminal.RemoteCallsign);
@@ -58,13 +55,15 @@ public sealed class RfUserSession
 
     /// <summary>
     /// Runs one RF session to completion over <paramref name="terminal"/>, bridged to the hub through
-    /// <paramref name="link"/>. Returns why it ended so the demux can close the child.
+    /// <paramref name="link"/>. Returns why it ended so the demux can close the child. Chat logging is
+    /// <b>not</b> done here: every channel/PM/presence action the hub emits is logged centrally at the
+    /// <see cref="HostLink"/> fan-out (design decision 7), so nothing can bypass it and nothing
+    /// double-logs.
     /// </summary>
     public static async Task<ConverseSessionEndReason> RunAsync(
         IConverseTerminal terminal,
         HostLink link,
         LocalSessionRegistry registry,
-        ChatLogWriter? chatLog,
         RfSessionConfig config,
         string sessionId,
         CancellationToken cancellationToken)
@@ -75,7 +74,7 @@ public sealed class RfUserSession
         ArgumentNullException.ThrowIfNull(config);
         ArgumentException.ThrowIfNullOrEmpty(sessionId);
 
-        var session = new RfUserSession(terminal, link, registry, chatLog, config, sessionId);
+        var session = new RfUserSession(terminal, link, registry, config, sessionId);
         return await session.RunCoreAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -132,7 +131,6 @@ public sealed class RfUserSession
     {
         await WriteLineAsync($"[{_config.NodeName} convers] Welcome {_call}.", ct).ConfigureAwait(false);
         await SubmitAsync(new ConversEvent.LocalJoin(_sessionId, _call, _config.DefaultChannel), ct).ConfigureAwait(false);
-        _chatLog?.LocalPresence(_call, _config.DefaultChannel, "joined");
 
         // Render the join's own-session notices (e.g. the persisted topic) from a snapshot.
         await ShowTopicAsync(_config.DefaultChannel, announceNone: false, ct).ConfigureAwait(false);
@@ -143,12 +141,8 @@ public sealed class RfUserSession
             : "Type 'help' for commands, or just type to chat.", ct).ConfigureAwait(false);
     }
 
-    private async Task SignOffAsync(string reason, CancellationToken ct)
-    {
-        int channel = await CurrentChannelAsync(ct).ConfigureAwait(false);
+    private async Task SignOffAsync(string reason, CancellationToken ct) =>
         await SubmitAsync(new ConversEvent.LocalLeave(_sessionId, reason), ct).ConfigureAwait(false);
-        _chatLog?.LocalPresence(_call, channel, reason.Trim().Length == 0 ? "left" : $"left: {reason.Trim()}");
-    }
 
     private string SignOffLine(string reason) =>
         reason.Trim().Length == 0
@@ -178,7 +172,6 @@ public sealed class RfUserSession
 
             case ConsoleIntent.Msg msg:
                 await SubmitAsync(new ConversEvent.LocalPrivateMessage(_sessionId, msg.To, msg.Text), ct).ConfigureAwait(false);
-                _chatLog?.LocalPrivate(_call, msg.To, msg.Text);
                 return;
 
             case ConsoleIntent.Topic topic:
@@ -194,11 +187,17 @@ public sealed class RfUserSession
 
             case ConsoleIntent.Away away:
                 await SubmitAsync(new ConversEvent.LocalSetAway(_sessionId, away.Text), ct).ConfigureAwait(false);
-                _chatLog?.LocalPresence(_call, await CurrentChannelAsync(ct).ConfigureAwait(false),
-                    away.Text.Trim().Length == 0 ? "back" : $"away: {away.Text.Trim()}");
                 await WriteLineAsync(away.Text.Trim().Length == 0
                     ? "You are back."
                     : $"You are away: {away.Text.Trim()}", ct).ConfigureAwait(false);
+                return;
+
+            case ConsoleIntent.Mode mode:
+                await HandleModeAsync(mode, ct).ConfigureAwait(false);
+                return;
+
+            case ConsoleIntent.Oper oper:
+                await HandleOperAsync(oper, ct).ConfigureAwait(false);
                 return;
 
             case ConsoleIntent.Who who:
@@ -231,9 +230,7 @@ public sealed class RfUserSession
             return;
         }
 
-        int channel = await CurrentChannelAsync(ct).ConfigureAwait(false);
         await SubmitAsync(new ConversEvent.LocalSay(_sessionId, say.Text), ct).ConfigureAwait(false);
-        _chatLog?.LocalChannel(_call, channel, say.Text);
     }
 
     private async Task HandleJoinAsync(ConsoleIntent.Join join, CancellationToken ct)
@@ -246,7 +243,6 @@ public sealed class RfUserSession
         }
 
         await SubmitAsync(new ConversEvent.LocalSwitchChannel(_sessionId, join.Channel.Value), ct).ConfigureAwait(false);
-        _chatLog?.LocalPresence(_call, join.Channel.Value, "joined");
         await ShowTopicAsync(join.Channel.Value, announceNone: false, ct).ConfigureAwait(false);
         await WriteLineAsync($"You are on channel {join.Channel.Value}.", ct).ConfigureAwait(false);
     }
@@ -261,6 +257,59 @@ public sealed class RfUserSession
         }
 
         await SubmitAsync(new ConversEvent.LocalSetTopic(_sessionId, topic.Text), ct).ConfigureAwait(false);
+    }
+
+    private async Task HandleModeAsync(ConsoleIntent.Mode mode, CancellationToken ct)
+    {
+        int current = await CurrentChannelAsync(ct).ConfigureAwait(false);
+        int channel = mode.Channel ?? current;
+        if (mode.Options.Trim().Length == 0)
+        {
+            // Show: read the current modes from the live hub snapshot.
+            ChannelMode modes = await _link.SnapshotAsync(hub => hub.GetChannel(channel).Modes, ct).ConfigureAwait(false);
+            await WriteLineAsync($"*** Channel {channel} modes: {ChannelModes.ToWire(modes)}", ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Set: the hub enforces operator status and answers a refusal as a DeliverModeNotice, and on
+        // success delivers a DeliverModeChange to the sessions ON that channel (rendered through the
+        // registry). When the target is a DIFFERENT channel than the one we are on, that DeliverModeChange
+        // would not reach us, so we confirm the resulting modes from a snapshot taken AFTER the submit
+        // (FIFO on the link's owning loop, so the snapshot observes the applied change).
+        await SubmitAsync(new ConversEvent.LocalSetMode(_sessionId, channel, mode.Options), ct).ConfigureAwait(false);
+        if (channel != current)
+        {
+            ChannelMode after = await _link.SnapshotAsync(hub => hub.GetChannel(channel).Modes, ct).ConfigureAwait(false);
+            await WriteLineAsync($"*** Channel {channel} modes: {ChannelModes.ToWire(after)}", ct).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleOperAsync(ConsoleIntent.Oper oper, CancellationToken ct)
+    {
+        if (oper.Secret.Length == 0)
+        {
+            await WriteLineAsync("Usage: oper <secret>", ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Mirror conversd SecretPass/SecretNum: a blank configured secret disables operator login.
+        if (_config.OperatorSecret.Length == 0 ||
+            !FixedTimeEquals(oper.Secret, _config.OperatorSecret))
+        {
+            await WriteLineAsync("Sorry, operator access denied.", ct).ConfigureAwait(false);
+            return;
+        }
+
+        await SubmitAsync(new ConversEvent.LocalSetOperator(_sessionId, -1, true), ct).ConfigureAwait(false);
+        await WriteLineAsync("*** You are now an operator.", ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Constant-time secret comparison so the operator secret cannot be guessed by timing.</summary>
+    private static bool FixedTimeEquals(string a, string b)
+    {
+        byte[] x = System.Text.Encoding.UTF8.GetBytes(a);
+        byte[] y = System.Text.Encoding.UTF8.GetBytes(b);
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(x, y);
     }
 
     private async Task HandleInviteAsync(ConsoleIntent.Invite invite, CancellationToken ct)
@@ -399,4 +448,10 @@ public sealed record RfSessionConfig
 
     /// <summary>The input surface this session presents (plain default / classic — design decision 9).</summary>
     public ConsoleInterface Interface { get; init; } = ConsoleInterface.Plain;
+
+    /// <summary>
+    /// The operator secret a user presents with <c>oper &lt;secret&gt;</c> to gain operator status
+    /// (conversd <c>SecretPass</c>/<c>SecretNum</c>). Blank disables operator login on this node.
+    /// </summary>
+    public string OperatorSecret { get; init; } = "";
 }

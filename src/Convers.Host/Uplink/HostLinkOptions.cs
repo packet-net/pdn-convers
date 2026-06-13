@@ -37,6 +37,13 @@ public sealed record HostLinkOptions
     public string? Password { get; init; }
 
     /// <summary>
+    /// The system-information string answered to an inbound <c>/..SYSI</c> for us (SPECS line 136: "at the
+    /// MINIMUM, the email address of the convers sysop should be available"). The Host fills this from
+    /// <c>convers.yaml</c>; empty means only the version/identity line is returned.
+    /// </summary>
+    public string SysInfo { get; init; } = "";
+
+    /// <summary>
     /// How long to wait for the parent's <c>/..HOST</c> reply before treating the attempt as failed and
     /// reconnecting.
     /// </summary>

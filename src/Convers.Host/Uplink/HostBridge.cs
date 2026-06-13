@@ -41,13 +41,26 @@ public static class HostBridge
             HostAway a => new ConversEvent.HostAway(a.User, a.Host, FromUnix(a.Time), a.Text),
             HostTopic t => new ConversEvent.HostTopic(t.User, t.Host, FromUnix(t.Time), t.Channel, t.Text),
             HostInvite i => new ConversEvent.HostInvite(i.From, i.User, i.Channel),
+
+            // /..MODE — the uplink is authoritative; the hub applies the toggle and honours it locally
+            // (forwarding suppression, topic-lock, moderation, join-gating). W7b wires this over the wire.
+            HostMode m => new ConversEvent.HostMode(m.Channel, m.Options),
+
+            // /..OPER — user becomes (channel == -1: global) operator; the hub tracks it so it can enforce
+            // +m/+t for the affected user and reflect op status in /who. The wire form carries the granter
+            // (FromName) but not the affected user's host, so the host is left blank (the op grant is
+            // recorded against the bare callsign; a same-named remote snapshot is reflected only if it
+            // matches that blank host, which is fine — the grant itself is what gates enforcement).
+            HostOper o => new ConversEvent.HostOper(o.User, string.Empty, o.Channel),
+
             HostPing => new ConversEvent.HostPing(),
             HostPong p => new ConversEvent.HostPong(p.Time),
             HostLoop l => new ConversEvent.HostLoop(l.Detail),
             UnknownHostCommand unknown => new ConversEvent.HostUnknown(HostCommandCodec.Format(unknown)),
 
-            // Verbs a strict leaf does not model into hub state (UADD/OPER/MODE/DEST/ROUT/SYSI/ECMD/HELP):
-            // record them as unknown so the FSM stays total and nothing is silently dropped.
+            // Verbs a strict leaf answers at the link layer (ROUT/SYSI) or does not model into hub state
+            // (UADD/DEST/ECMD/HELP): record them as unknown so the FSM stays total and nothing is silently
+            // dropped. ROUT/SYSI are additionally handled by the HostLinkEngine before reaching here.
             _ => new ConversEvent.HostUnknown(HostCommandCodec.Format(command)),
         };
     }
@@ -71,6 +84,11 @@ public static class HostBridge
             ConversAction.SendAway a => new HostAway(a.User, a.Host, ToUnix(a.Timestamp), a.Text),
             ConversAction.SendTopic t => new HostTopic(t.User, t.Host, ToUnix(t.Timestamp), t.Channel, t.Text),
             ConversAction.SendInvite i => new HostInvite(i.From, i.User, i.Channel),
+
+            // /..MODE — a local channel-operator changed the modes; push the canonical full mode string up
+            // so the parent and the rest of the network converge on the same set (design decision 5).
+            ConversAction.SendMode m => new HostMode(m.Channel, m.Options),
+
             ConversAction.SendPong p => new HostPong(p.MillisecondsOrSentinel),
             _ => null, // Deliver* (local) and DropUplink (link control) are not wire commands
         };

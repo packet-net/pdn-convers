@@ -26,6 +26,28 @@ public class ActionRendererTests
     }
 
     [Fact]
+    public void ModeChange_ToMe_RendersWireModeString()
+    {
+        // ToWire renders in conversd's canonical s-p-t-i-m-l order, so t precedes m.
+        string? line = ActionRenderer.RenderOne(
+            new ConversAction.DeliverModeChange(Me, 100, ChannelMode.Moderated | ChannelMode.TopicLocked), Me);
+        Assert.Equal("*** Channel 100 modes: +tm", line);
+    }
+
+    [Fact]
+    public void ModeNotice_ToMe_RendersReason()
+    {
+        string? line = ActionRenderer.RenderOne(
+            new ConversAction.DeliverModeNotice(Me, 100, "You must be a channel operator to set modes."), Me);
+        Assert.Equal("*** You must be a channel operator to set modes.", line);
+    }
+
+    [Fact]
+    public void ModeChange_ToAnotherSession_IsNull() =>
+        Assert.Null(ActionRenderer.RenderOne(
+            new ConversAction.DeliverModeChange(Other, 100, ChannelMode.Secret), Me));
+
+    [Fact]
     public void JoinNotice_RendersSentence()
     {
         string? line = ActionRenderer.RenderOne(

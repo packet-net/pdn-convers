@@ -311,4 +311,73 @@ public class HostLinkTests
         first.PushLine(Wire.Host("LOOP ORACLE PDNCONV g4abc HOST"));
         await WaitUntilAsync(() => first.Disposed, "link dropped on /..LOOP");
     }
+
+    [Fact]
+    public async Task LinkTimeP_RoundTrip_IsMeasuredAndSurfaced()
+    {
+        var oracle = new ScriptedUpstreamLink();
+        await using Harness h = Start(new ScriptedUpstreamLinkFactory().EnqueueLink(oracle));
+
+        _ = await oracle.ReadSentAsync(Timeout);
+        oracle.PushLine(OracleHandshake);
+        await h.Link.WaitForUpAsync(new CancellationTokenSource(Timeout).Token);
+        Assert.Null(h.Link.LastRoundTripMs); // no measurement yet
+        Assert.Equal("ORACLE", h.Link.PeerHostName);
+
+        // Provoke a keepalive ping, let a little time pass, then answer with a pong.
+        h.Time.Advance(TimeSpan.FromSeconds(61));
+        await WaitUntilAsync(
+            () => oracle.SentLines.Any(l => HostCommandCodec.Parse(l) is HostPing), "a keepalive ping");
+        h.Time.Advance(TimeSpan.FromMilliseconds(200));
+        oracle.PushLine(Wire.Host("PONG 3"));
+
+        // The measured round-trip (the link-time `p` facility) is surfaced on the link.
+        await WaitUntilAsync(() => h.Link.LastRoundTripMs is not null, "round-trip measured and surfaced");
+        Assert.InRange(h.Link.LastRoundTripMs!.Value, 0, 5000);
+    }
+
+    [Fact]
+    public async Task LocalModeSet_ByOperator_GoesUpstreamAsMode()
+    {
+        var oracle = new ScriptedUpstreamLink();
+        await using Harness h = Start(new ScriptedUpstreamLinkFactory().EnqueueLink(oracle));
+
+        _ = await oracle.ReadSentAsync(Timeout);
+        oracle.PushLine(OracleHandshake);
+        await h.Link.WaitForUpAsync(new CancellationTokenSource(Timeout).Token);
+
+        // A local user joins and is granted operator, then sets modes; the hub enforces and emits /..MODE.
+        await h.Link.SubmitLocalEventAsync(new ConversEvent.LocalJoin("s1", "M0LTE", 3333), CancellationToken.None);
+        await h.Link.SubmitLocalEventAsync(new ConversEvent.LocalSetOperator("s1", 3333, true), CancellationToken.None);
+        await h.Link.SubmitLocalEventAsync(new ConversEvent.LocalSetMode("s1", 3333, "+mt"), CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => oracle.SentLines.Any(l => HostCommandCodec.Parse(l) is HostMode { Channel: 3333 }),
+            "a /..MODE went upstream");
+
+        var mode = oracle.SentLines.Select(HostCommandCodec.Parse).OfType<HostMode>().First(m => m.Channel == 3333);
+        Assert.Equal("+tm", mode.Options); // canonical full mode string after the toggle (s-p-t-i-m-l order)
+    }
+
+    [Fact]
+    public async Task InboundMode_DeliversModeChange_ToLocalSessionOnTheChannel()
+    {
+        var oracle = new ScriptedUpstreamLink();
+        await using Harness h = Start(new ScriptedUpstreamLinkFactory().EnqueueLink(oracle));
+
+        await h.Link.SubmitLocalEventAsync(new ConversEvent.LocalJoin("s1", "M0LTE", 3333), CancellationToken.None);
+        oracle.PushLine(OracleHandshake);
+        await h.Link.WaitForUpAsync(new CancellationTokenSource(Timeout).Token);
+
+        // The uplink (authoritative) sets the channel's modes; the local listener is told.
+        oracle.PushLine(Wire.Host("MODE 3333 +m"));
+
+        await WaitUntilAsync(
+            () => h.Local.Actions.OfType<ConversAction.DeliverModeChange>().Any(a => a.SessionId == "s1"),
+            "DeliverModeChange to the local session");
+
+        var change = h.Local.Actions.OfType<ConversAction.DeliverModeChange>().First(a => a.SessionId == "s1");
+        Assert.Equal(3333, change.Channel);
+        Assert.True((change.Modes & ChannelMode.Moderated) != 0);
+    }
 }

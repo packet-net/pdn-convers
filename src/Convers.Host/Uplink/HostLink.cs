@@ -35,6 +35,7 @@ public sealed class HostLink : IAsyncDisposable
     private readonly ConversHub _hub;
     private readonly ILocalDelivery _local;
     private readonly IInboundObserver _inbound;
+    private readonly ILocalEventObserver _localObserver;
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
     private readonly TimeSpan _tickInterval;
@@ -48,6 +49,8 @@ public sealed class HostLink : IAsyncDisposable
 
     private volatile IUpstreamLink? _link;
     private volatile TaskCompletionSource _up = NewTcs();
+    private long _lastRoundTripMs = -1;
+    private volatile string _peerHostName = string.Empty;
 
     /// <summary>Creates the link. Call <see cref="RunAsync"/> to start the connect/reconnect loop.</summary>
     public HostLink(
@@ -57,7 +60,8 @@ public sealed class HostLink : IAsyncDisposable
         TimeProvider timeProvider,
         ILogger<HostLink> logger,
         ILocalDelivery? localDelivery = null,
-        IInboundObserver? inboundObserver = null)
+        IInboundObserver? inboundObserver = null,
+        ILocalEventObserver? localObserver = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(factory);
@@ -70,6 +74,7 @@ public sealed class HostLink : IAsyncDisposable
         _hub = hub;
         _local = localDelivery ?? NullLocalDelivery.Instance;
         _inbound = inboundObserver ?? NullInboundObserver.Instance;
+        _localObserver = localObserver ?? NullLocalEventObserver.Instance;
         _time = timeProvider;
         _logger = logger;
         // Tick a few times per ping interval so keepalive/silence fire promptly without busy-waiting.
@@ -82,6 +87,24 @@ public sealed class HostLink : IAsyncDisposable
 
     /// <summary>Completes when the uplink reaches the established state (a fresh wait per outage).</summary>
     public Task WaitForUpAsync(CancellationToken cancellationToken) => _up.Task.WaitAsync(cancellationToken);
+
+    /// <summary>
+    /// The last measured uplink round-trip time (our PING → the parent's PONG) in milliseconds, or
+    /// <see langword="null"/> when the link is down or no measurement has been taken yet — the link-time
+    /// <c>p</c> facility (SPECS facility <c>p</c>), surfaced for status / diagnostics. Read-only snapshot
+    /// of the live engine's measurement, updated as PONGs arrive.
+    /// </summary>
+    public long? LastRoundTripMs
+    {
+        get
+        {
+            long v = Interlocked.Read(ref _lastRoundTripMs);
+            return v < 0 ? null : v;
+        }
+    }
+
+    /// <summary>The parent's reported host name once the link is established (empty when down).</summary>
+    public string PeerHostName => _peerHostName;
 
     /// <summary>
     /// Submit a local-originated domain event (an RF/web user's join/say/leave …). It is applied to the
@@ -259,6 +282,9 @@ public sealed class HostLink : IAsyncDisposable
                     await OnEstablishedAsync(link, engine, cancellationToken).ConfigureAwait(false);
                 }
 
+                // Surface the link-time `p` measurement as the engine records it (a PONG just landed).
+                UpdateRoundTrip(engine.LastRoundTripMs);
+
                 receive = link.ReceiveLineAsync(cancellationToken);
             }
             else if (completed == localWait)
@@ -339,7 +365,18 @@ public sealed class HostLink : IAsyncDisposable
             // (local-only) path identically.
             try
             {
-                await DispatchActionsAsync(link, _hub.Advance(@event), cancellationToken).ConfigureAwait(false);
+                // Centralised chat logging (design decision 7): resolve the speaker's callsign/channel from
+                // the hub BEFORE advancing (a LocalLeave removes the session), apply, then log once from the
+                // resulting actions. This is the single fan-out point every local event passes through — no
+                // session-layer call can bypass it, nothing double-logs, and a mode-refused say/join (no
+                // Send/Deliver, only a notice) is not mis-logged.
+                (string call, int channel, bool loggable) = ResolveLocalIdentity(@event);
+                IReadOnlyList<ConversAction> actions = _hub.Advance(@event);
+                await DispatchActionsAsync(link, actions, cancellationToken).ConfigureAwait(false);
+                if (loggable)
+                {
+                    _localObserver.OnLocal(@event, call, channel, actions);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -380,6 +417,45 @@ public sealed class HostLink : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Resolves the speaker's callsign and channel for a local event for chat logging, run on the owning
+    /// loop just before the hub mutates. A <see cref="ConversEvent.LocalJoin"/> carries its own callsign
+    /// and channel (no session exists yet); every other loggable kind carries a session id whose live hub
+    /// session supplies them. Returns whether the event is one the observer logs at all.
+    /// </summary>
+    private (string Call, int Channel, bool Loggable) ResolveLocalIdentity(ConversEvent @event)
+    {
+        if (!_localObserver.IsLoggable(@event))
+        {
+            return (string.Empty, 0, false);
+        }
+
+        if (@event is ConversEvent.LocalJoin join)
+        {
+            return (Callsigns.Normalize(join.Callsign), join.Channel, true);
+        }
+
+        string? sessionId = @event switch
+        {
+            ConversEvent.LocalSay s => s.SessionId,
+            ConversEvent.LocalPrivateMessage m => m.SessionId,
+            ConversEvent.LocalSwitchChannel sw => sw.SessionId,
+            ConversEvent.LocalLeave l => l.SessionId,
+            ConversEvent.LocalSetAway a => a.SessionId,
+            _ => null,
+        };
+
+        if (sessionId is null)
+        {
+            return (string.Empty, 0, false);
+        }
+
+        LocalSession? session = _hub.GetSession(sessionId);
+        return session is null
+            ? (string.Empty, 0, false)
+            : (session.Callsign, session.Channel, true);
+    }
+
     private static async Task SendCommandAsync(IUpstreamLink link, HostCommand command, CancellationToken cancellationToken)
     {
         string line = HostCommandCodec.Format(command);
@@ -395,6 +471,7 @@ public sealed class HostLink : IAsyncDisposable
     private async Task OnEstablishedAsync(IUpstreamLink link, HostLinkEngine engine, CancellationToken cancellationToken)
     {
         MarkUp();
+        _peerHostName = engine.PeerHostName;
         LogEstablished(_logger, engine.PeerHostName, FacilitiesCodec.Format(engine.NegotiatedFacilities), null);
 
         foreach (NetworkUser user in _hub.NetworkUsers)
@@ -444,6 +521,24 @@ public sealed class HostLink : IAsyncDisposable
         {
             _up = NewTcs();
         }
+
+        Interlocked.Exchange(ref _lastRoundTripMs, -1);
+        _peerHostName = string.Empty;
+    }
+
+    /// <summary>Records (and logs, on change) the engine's latest link-time `p` round-trip measurement.</summary>
+    private void UpdateRoundTrip(long? measuredMs)
+    {
+        if (measuredMs is not { } ms)
+        {
+            return;
+        }
+
+        long previous = Interlocked.Exchange(ref _lastRoundTripMs, ms);
+        if (previous != ms)
+        {
+            LogRoundTrip(_logger, ms, null);
+        }
     }
 
     private static TaskCompletionSource NewTcs() => new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -471,4 +566,8 @@ public sealed class HostLink : IAsyncDisposable
     private static readonly Action<ILogger, string, Exception?> LogLocalEventFailed =
         LoggerMessage.Define<string>(LogLevel.Warning, new EventId(6, "LocalEventFailed"),
             "A local event failed to apply (skipped): {Reason}");
+
+    private static readonly Action<ILogger, long, Exception?> LogRoundTrip =
+        LoggerMessage.Define<long>(LogLevel.Debug, new EventId(7, "UplinkRoundTrip"),
+            "Uplink round-trip (link-time p): {Milliseconds}ms");
 }

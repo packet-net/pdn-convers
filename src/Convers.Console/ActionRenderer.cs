@@ -57,6 +57,12 @@ public static class ActionRenderer
         ConversAction.DeliverTopic a when Mine(a.SessionId, mySessionId) =>
             RenderTopic(a),
 
+        ConversAction.DeliverModeChange a when Mine(a.SessionId, mySessionId) =>
+            Inv($"*** Channel {a.Channel} modes: {ChannelModes.ToWire(a.Modes)}"),
+
+        ConversAction.DeliverModeNotice a when Mine(a.SessionId, mySessionId) =>
+            Inv($"*** {a.Reason}"),
+
         _ => null,
     };
 

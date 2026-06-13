@@ -88,6 +88,8 @@ public sealed class LocalSessionRegistry : ILocalDelivery
         ConversAction.DeliverJoinNotice a => a.SessionId,
         ConversAction.DeliverLeaveNotice a => a.SessionId,
         ConversAction.DeliverTopic a => a.SessionId,
+        ConversAction.DeliverModeChange a => a.SessionId,
+        ConversAction.DeliverModeNotice a => a.SessionId,
         _ => null,
     };
 }

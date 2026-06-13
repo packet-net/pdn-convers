@@ -108,6 +108,7 @@ public static class HostComposition
         {
             HostName = HostNameFor(config, callsign),
             Password = string.IsNullOrEmpty(config.Uplink.Password) ? null : config.Uplink.Password,
+            SysInfo = config.Sysinfo,
         };
         builder.Services.AddSingleton(sp => new HostLink(
             hostLinkOptions,
@@ -116,19 +117,22 @@ public static class HostComposition
             time,
             sp.GetRequiredService<ILogger<HostLink>>(),
             sp.GetRequiredService<LocalSessionRegistry>(),
+            // The chat-log writer is BOTH the inbound (network) observer and the local-event observer, so
+            // every channel/PM/presence event the hub processes is logged once at this single fan-out.
+            sp.GetRequiredService<ChatLogWriter>(),
             sp.GetRequiredService<ChatLogWriter>()));
 
         var sessionConfig = new RfSessionConfig
         {
             NodeName = callsign,
             DefaultChannel = config.DefaultChannel,
+            OperatorSecret = config.OperatorSecret,
         };
         builder.Services.AddSingleton(sp => new InboundDemux(
             sp.GetRequiredService<RhpNodeLink>(),
             sp.GetRequiredService<HostLink>(),
             sp.GetRequiredService<LocalSessionRegistry>(),
             sp.GetRequiredService<IConsolePreferences>(),
-            sp.GetRequiredService<ChatLogWriter>(),
             sessionConfig,
             sp.GetRequiredService<ILogger<InboundDemux>>()));
 
@@ -137,9 +141,9 @@ public static class HostComposition
         builder.Services.AddSingleton(sp => new WebChatSessions(
             sp.GetRequiredService<HostLink>(),
             sp.GetRequiredService<LocalSessionRegistry>(),
-            sp.GetRequiredService<ChatLogWriter>(),
             time,
-            config.DefaultChannel));
+            config.DefaultChannel,
+            config.OperatorSecret));
 
         // One ComponentService<T> per loop — distinct closed generics so AddHostedService (which
         // de-duplicates by implementation type) registers every loop. A single non-generic component
@@ -155,6 +159,15 @@ public static class HostComposition
 
         // Liveness for scripts/deploy-convers.sh and the node supervisor.
         app.MapGet("/healthz", () => Results.Text("ok"));
+
+        // Uplink status snapshot — surfaces the link-time `p` round-trip measurement (SPECS facility p)
+        // plus the parent and link state, for diagnostics / the supervisor.
+        app.MapGet("/status", (HostLink link) => Results.Json(new
+        {
+            uplink = link.IsUp ? "up" : "down",
+            peer = link.PeerHostName,
+            roundTripMs = link.LastRoundTripMs,
+        }));
 
         // W5b — the web chat tile (pdn-bbs webmail style): server-rendered, gateway identity is the auth
         // boundary (no second login), web users are local sessions joining the same channels as RF users.

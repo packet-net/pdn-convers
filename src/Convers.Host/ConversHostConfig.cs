@@ -31,6 +31,19 @@ public sealed record ConversHostConfig
     public string Sysop { get; init; } = "";
 
     /// <summary>
+    /// The operator secret a local user presents with <c>oper &lt;secret&gt;</c> to gain operator status
+    /// (mirrors conversd <c>SecretPass</c>/<c>SecretNum</c>: a configured secret/password). Blank disables
+    /// operator login entirely (conversd's <c>SecretNum 0</c> behaviour) — no secret can be matched.
+    /// </summary>
+    public string OperatorSecret { get; init; } = "";
+
+    /// <summary>
+    /// The system-information string answered to an inbound <c>/..SYSI</c> (SPECS line 136). Typically the
+    /// sysop's email / a one-line node description. Blank returns only the identity/version line.
+    /// </summary>
+    public string Sysinfo { get; init; } = "";
+
+    /// <summary>
     /// The channel packet.net users land on at connect without choosing (design.md decision: a fixed
     /// default channel; the handover reserves 256–32767, avoiding collisions).
     /// </summary>
@@ -186,6 +199,15 @@ public static class ConversHostConfigFile
 
         # sysop: the sysop's callsign (sysop rights on the console; sysop view in the web tile).
         sysop: ""
+
+        # operatorSecret: the secret a local user types as `oper <secret>` to gain operator status
+        #                 (mirrors conversd SecretPass/SecretNum). Operators can set channel modes and the
+        #                 topic on +t (topic-locked) channels. Leave blank to disable operator login.
+        operatorSecret: ""
+
+        # sysinfo: one line of system information answered to a network /..SYSI query (e.g. the sysop's
+        #          email or a short node description). Leave blank for just the identity/version line.
+        sysinfo: ""
 
         # defaultChannel: the channel packet.net users land on at connect without choosing.
         #                 Must be 0..32767; pick a public number 256..32767 that is not already in

@@ -219,6 +219,104 @@ public class HostLinkEngineTests
     }
 
     [Fact]
+    public void Established_InboundMode_BecomesHubEvent()
+    {
+        (HostLinkEngine engine, _) = NewEngine();
+        engine.OnConnected();
+        engine.OnLineReceived(Wire.Host("HOST ORACLE saupp1.62a Aadmpunfi"));
+
+        EngineStep step = engine.OnLineReceived(Wire.Host("MODE 3333 +mt"));
+
+        var mode = Assert.IsType<ConversEvent.HostMode>(Assert.Single(step.HubEvents));
+        Assert.Equal(3333, mode.Channel);
+        Assert.Equal("+mt", mode.Options);
+        Assert.Empty(step.OutboundCommands);
+    }
+
+    [Fact]
+    public void Established_InboundOper_BecomesHubEvent()
+    {
+        (HostLinkEngine engine, _) = NewEngine();
+        engine.OnConnected();
+        engine.OnLineReceived(Wire.Host("HOST ORACLE saupp1.62a Aadmpunfi"));
+
+        EngineStep step = engine.OnLineReceived(Wire.Host("OPER conversd -1 g4abc"));
+
+        var oper = Assert.IsType<ConversEvent.HostOper>(Assert.Single(step.HubEvents));
+        Assert.Equal("g4abc", oper.User);
+        Assert.Equal(-1, oper.Channel);
+        Assert.True(oper.Grant);
+    }
+
+    [Fact]
+    public void Established_InboundRoute_AnswersWithRouteNotice_AndNeverForwards()
+    {
+        (HostLinkEngine engine, _) = NewEngine();
+        engine.OnConnected();
+        engine.OnLineReceived(Wire.Host("HOST ORACLE saupp1.62a Aadmpunfi"));
+
+        // A user queries the route to a remote host; ttl > 0 would mean "forward to the next hop" — but a
+        // strict leaf is not transit, so we answer and never forward (the TTL guard, design decision 1).
+        EngineStep step = engine.OnLineReceived(Wire.Host("ROUT FARHOST g4abc 5"));
+
+        HostCommand only = Assert.Single(step.OutboundCommands);
+        var umsg = Assert.IsType<HostUserMessage>(only);
+        Assert.Equal("conversd", umsg.From);
+        Assert.Equal("g4abc", umsg.To);
+        Assert.Contains("route:", umsg.Text);
+        Assert.Contains("PDNCONV", umsg.Text);
+        Assert.Contains("FARHOST", umsg.Text);
+        // It is NOT re-emitted as a /..ROUT (no forwarding).
+        Assert.DoesNotContain(step.OutboundCommands, c => c is HostRoute);
+        Assert.Empty(step.HubEvents);
+    }
+
+    [Fact]
+    public void Established_InboundSysInfo_ForUs_AnswersWithIdentityAndConfiguredString()
+    {
+        var time = new FakeTimeProvider(T0);
+        var engine = new HostLinkEngine(Options() with { SysInfo = "sysop: tom@example.org" }, time);
+        engine.OnConnected();
+        engine.OnLineReceived(Wire.Host("HOST ORACLE saupp1.62a Aadmpunfi"));
+
+        EngineStep step = engine.OnLineReceived(Wire.Host("SYSI g4abc PDNCONV"));
+
+        Assert.All(step.OutboundCommands, c => Assert.IsType<HostUserMessage>(c));
+        var replies = step.OutboundCommands.Cast<HostUserMessage>().ToList();
+        Assert.Equal(2, replies.Count);
+        Assert.All(replies, r => Assert.Equal("g4abc", r.To));
+        Assert.Contains(replies, r => r.Text.Contains("pdn-convers", StringComparison.Ordinal));
+        Assert.Contains(replies, r => r.Text.Contains("tom@example.org", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Established_InboundSysInfo_All_IsAnswered()
+    {
+        (HostLinkEngine engine, _) = NewEngine();
+        engine.OnConnected();
+        engine.OnLineReceived(Wire.Host("HOST ORACLE saupp1.62a Aadmpunfi"));
+
+        EngineStep step = engine.OnLineReceived(Wire.Host("SYSI g4abc all"));
+
+        Assert.NotEmpty(step.OutboundCommands);
+        Assert.All(step.OutboundCommands, c => Assert.IsType<HostUserMessage>(c));
+    }
+
+    [Fact]
+    public void Established_InboundSysInfo_ForAnotherHost_IsNotAnswered()
+    {
+        (HostLinkEngine engine, _) = NewEngine();
+        engine.OnConnected();
+        engine.OnLineReceived(Wire.Host("HOST ORACLE saupp1.62a Aadmpunfi"));
+
+        // A SYSI for some other host is not ours to answer (we are no transit) — no reply, no forward.
+        EngineStep step = engine.OnLineReceived(Wire.Host("SYSI g4abc SOMEONE"));
+
+        Assert.Empty(step.OutboundCommands);
+        Assert.Empty(step.HubEvents);
+    }
+
+    [Fact]
     public void EarlyPresence_BeforeHandshakeReply_IsBufferedAsHubEvent()
     {
         // conversd announces users right after sending its /..HOST; if a presence line arrives before our

@@ -125,6 +125,12 @@ public static class ConsoleParser
             case "away":
                 return new ConsoleIntent.Away(rest);
 
+            case "mode":
+                return ParseMode(rest);
+
+            case "oper":
+                return new ConsoleIntent.Oper(rest.Trim());
+
             case "who":
                 return new ConsoleIntent.Who(rest);
 
@@ -176,6 +182,26 @@ public static class ConsoleParser
         }
 
         return new ConsoleIntent.Unknown(raw);
+    }
+
+    private static ConsoleIntent.Mode ParseMode(string rest)
+    {
+        rest = rest.Trim();
+        if (rest.Length == 0)
+        {
+            // Bare 'mode' / '/mode' shows the current channel's modes.
+            return new ConsoleIntent.Mode(null, string.Empty);
+        }
+
+        // An optional leading channel token (bare number or #number) targets a specific channel; anything
+        // else (a +/- toggle string, or a bare letter set) applies to the current channel.
+        (string first, string after) = SplitFirstWord(rest);
+        if (TryParseChannel(first, out int channel))
+        {
+            return new ConsoleIntent.Mode(channel, after.Trim());
+        }
+
+        return new ConsoleIntent.Mode(null, rest);
     }
 
     private static ConsoleIntent ParseInvite(string rest, string raw)

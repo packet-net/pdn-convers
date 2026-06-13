@@ -44,6 +44,18 @@ public class ConversHostConfigTests
         Assert.Equal(3333, config.DefaultChannel);
         Assert.Equal("127.0.0.1", config.Web.Bind);
         Assert.Null(config.Uplink.Provider);    // no parent yet — uplink unset
+        Assert.Equal("", config.OperatorSecret); // operator login disabled by default
+        Assert.Equal("", config.Sysinfo);
+    }
+
+    [Fact]
+    public void OperatorSecretAndSysinfo_Parse()
+    {
+        ConversHostConfig config = ConversHostConfigFile.Parse(
+            "operatorSecret: letmein\nsysinfo: \"sysop tom@example.org\"\n");
+
+        Assert.Equal("letmein", config.OperatorSecret);
+        Assert.Equal("sysop tom@example.org", config.Sysinfo);
     }
 
     [Fact]

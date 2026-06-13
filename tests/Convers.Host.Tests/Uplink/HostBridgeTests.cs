@@ -65,14 +65,38 @@ public class HostBridgeTests
     }
 
     [Fact]
-    public void ToEvent_UnmodelledModelledVerb_OPER_RecordedAsUnknown_NotDropped()
+    public void ToEvent_Mode_MapsToHostModeEvent()
     {
-        // OPER is a modelled Protocol command but the strict leaf does not fold it into hub state.
+        var cmd = new HostMode(3333, "+mt");
+
+        var mode = Assert.IsType<ConversEvent.HostMode>(HostBridge.ToEvent(cmd));
+
+        Assert.Equal(3333, mode.Channel);
+        Assert.Equal("+mt", mode.Options);
+    }
+
+    [Fact]
+    public void ToEvent_Oper_MapsToHostOperEvent_AsAGrant()
+    {
+        // W7b wires /..OPER into hub state so the leaf can track operator status. The wire form carries the
+        // granter (FromName) and the affected user but not the user's host; the host is left blank.
         var cmd = new HostOper("conversd", 3333, "g4abc");
 
-        var unknown = Assert.IsType<ConversEvent.HostUnknown>(HostBridge.ToEvent(cmd));
+        var oper = Assert.IsType<ConversEvent.HostOper>(HostBridge.ToEvent(cmd));
 
-        Assert.Contains("OPER conversd 3333 g4abc", unknown.Raw);
+        Assert.Equal("g4abc", oper.User);
+        Assert.Equal(3333, oper.Channel);
+        Assert.True(oper.Grant);
+    }
+
+    [Fact]
+    public void ToHostCommand_SendMode_MapsToMode()
+    {
+        var cmd = HostBridge.ToHostCommand(new ConversAction.SendMode(3333, "+mt"));
+
+        var mode = Assert.IsType<HostMode>(cmd);
+        Assert.Equal(3333, mode.Channel);
+        Assert.Equal("+mt", mode.Options);
     }
 
     [Fact]

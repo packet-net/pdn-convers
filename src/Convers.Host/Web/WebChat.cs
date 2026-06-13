@@ -51,9 +51,10 @@ public static class WebChat
 
         app.Use(async (context, next) =>
         {
-            // The node supervisor / deploy script polls /healthz with no gateway identity (the W0 liveness
-            // contract) — it is not part of the chat tile, so it bypasses the gateway gate.
-            if (context.Request.Path.Equals("/healthz", StringComparison.OrdinalIgnoreCase))
+            // The node supervisor / deploy script polls /healthz (and /status, the uplink snapshot) with no
+            // gateway identity — those are not part of the chat tile, so they bypass the gateway gate.
+            if (context.Request.Path.Equals("/healthz", StringComparison.OrdinalIgnoreCase) ||
+                context.Request.Path.Equals("/status", StringComparison.OrdinalIgnoreCase))
             {
                 await next().ConfigureAwait(false);
                 return;
@@ -87,8 +88,8 @@ public static class WebChat
 
         // The channel view — the user's current channel: who's present (live hub snapshot) + recent
         // messages (durable chat-log scrollback). An optional ?channel= just sets the view target.
-        app.MapGet("/", (HttpContext ctx, int? channel, CancellationToken ct) =>
-            WithCallsign(ctx, (prefix, call) => ChannelViewAsync(options, prefix, call, channel, ct)));
+        app.MapGet("/", (HttpContext ctx, int? channel, string? oper, CancellationToken ct) =>
+            WithCallsign(ctx, (prefix, call) => ChannelViewAsync(options, prefix, call, channel, oper, ct)));
 
         // Send a message to the current channel (the SAME hub seam RF users use).
         app.MapPost("/say", async (HttpContext ctx, CancellationToken ct) =>
@@ -157,6 +158,51 @@ public static class WebChat
             return Results.Redirect(U(prefix, "/"));
         });
 
+        // Set the modes of the current channel (the hub enforces operator status; a non-op is refused).
+        app.MapPost("/mode", async (HttpContext ctx, CancellationToken ct) =>
+        {
+            string? call = PdnCallsign(ctx);
+            string prefix = Prefix(ctx);
+            if (call is null)
+            {
+                return Unmapped(ctx);
+            }
+
+            IFormCollection form = await ctx.Request.ReadFormAsync(ct).ConfigureAwait(false);
+            await options.Sessions.SetModeAsync(call, form["options"].ToString().Trim(), ct).ConfigureAwait(false);
+            return Results.Redirect(U(prefix, "/"));
+        });
+
+        // Set / clear the web user's away message.
+        app.MapPost("/away", async (HttpContext ctx, CancellationToken ct) =>
+        {
+            string? call = PdnCallsign(ctx);
+            string prefix = Prefix(ctx);
+            if (call is null)
+            {
+                return Unmapped(ctx);
+            }
+
+            IFormCollection form = await ctx.Request.ReadFormAsync(ct).ConfigureAwait(false);
+            await options.Sessions.SetAwayAsync(call, form["text"].ToString().Trim(), ct).ConfigureAwait(false);
+            return Results.Redirect(U(prefix, "/"));
+        });
+
+        // Operator login (/..OPER semantics) — the node operator secret grants operator status.
+        app.MapPost("/oper", async (HttpContext ctx, CancellationToken ct) =>
+        {
+            string? call = PdnCallsign(ctx);
+            string prefix = Prefix(ctx);
+            if (call is null)
+            {
+                return Unmapped(ctx);
+            }
+
+            IFormCollection form = await ctx.Request.ReadFormAsync(ct).ConfigureAwait(false);
+            bool ok = await options.Sessions.TryOperAsync(call, form["secret"].ToString(), ct).ConfigureAwait(false);
+            return Results.Redirect(U(prefix, ok ? "/?oper=ok" : "/?oper=fail"));
+        });
+
         // The who page — everyone present on the user's current channel (and the whole network).
         app.MapGet("/who", (HttpContext ctx, CancellationToken ct) =>
             WithCallsign(ctx, (prefix, call) => WhoAsync(options, prefix, call, ct)));
@@ -207,7 +253,7 @@ public static class WebChat
     // ---------------------------------------------------------------- pages
 
     private static async Task<IResult> ChannelViewAsync(
-        WebChatOptions o, string prefix, string call, int? requestedChannel, CancellationToken ct)
+        WebChatOptions o, string prefix, string call, int? requestedChannel, string? operResult, CancellationToken ct)
     {
         // Opening the tile makes the web user present (joined) on a channel, exactly like an RF user who is
         // present the moment they connect — so RF users see them in `who` and their messages fan out. A
@@ -224,9 +270,10 @@ public static class WebChat
             channel = await o.Sessions.EnsureJoinedAsync(call, ct).ConfigureAwait(false);
         }
 
-        // Live presence + topic from the hub (read on its owning loop via the link seam — never off-loop).
-        (IReadOnlyList<NetworkUser> present, string topic, string topicBy) =
+        // Live presence + topic + modes from the hub (read on its owning loop via the link seam).
+        (IReadOnlyList<NetworkUser> present, string topic, string topicBy, ChannelMode modes) =
             await o.Sessions.SnapshotChannelAsync(channel, ct).ConfigureAwait(false);
+        bool isOperator = await o.Sessions.IsOperatorAsync(call, ct).ConfigureAwait(false);
 
         // Durable scrollback from the chat log (channel messages + presence for this channel).
         IReadOnlyList<ChatLogEntry> log = o.Store.QueryChatLog(channel: channel, limit: o.ScrollbackRows);
@@ -236,6 +283,28 @@ public static class WebChat
         string topicLine = topic.Length == 0
             ? "<span class=\"dim\">no topic set</span>"
             : Inv($"{H(topic)}{(topicBy.Length == 0 ? "" : Inv($" <span class=\"dim\">(set by {H(topicBy)})</span>"))}");
+        string modeLine = Inv($"<code>{H(ChannelModes.ToWire(modes))}</code> {H(DescribeModes(modes))}");
+        string operFeedback = operResult switch
+        {
+            "ok" => "<p class=\"ok\">You are now an operator.</p>",
+            "fail" => "<p class=\"err\">Operator access denied.</p>",
+            _ => "",
+        };
+
+        // The mode + operator control. A non-operator sees an operator-login box; an operator gets a
+        // mode-set box (the hub still enforces, so the box is a convenience, not the gate).
+        string control = isOperator
+            ? $"""
+                <p class="dim">You are an operator.</p>
+                <form method="post" action="{U(prefix, "/mode")}" class="modeform">
+                <input name="options" placeholder="+mt / -s …" size="10">
+                <button type="submit">Set modes</button></form>
+                """
+            : $"""
+                <form method="post" action="{U(prefix, "/oper")}" class="operform">
+                <input name="secret" type="password" placeholder="operator secret" size="14">
+                <button type="submit">Become operator</button></form>
+                """;
 
         string body = $"""
             <div class="bar">
@@ -248,6 +317,7 @@ public static class WebChat
             <section class="chat">
             <h2>Channel {channel}</h2>
             <p class="topic">Topic: {topicLine}</p>
+            <p class="modes">Modes: {modeLine}</p>
             <form method="post" action="{U(prefix, "/topic")}" class="topicform">
             <input name="topic" placeholder="set the topic…" size="48">
             <button type="submit">Set topic</button></form>
@@ -259,6 +329,12 @@ public static class WebChat
             <aside class="who">
             <h3>Here now <span class="dim">({present.Count})</span></h3>
             {who}
+            <h3>You</h3>
+            {operFeedback}
+            <form method="post" action="{U(prefix, "/away")}" class="awayform">
+            <input name="text" placeholder="away message (blank = back)" size="18">
+            <button type="submit">Set away</button></form>
+            {control}
             <h3>Private message</h3>
             <form method="post" action="{U(prefix, "/msg")}" class="pm">
             <input name="to" placeholder="callsign" size="10" required>
@@ -317,6 +393,48 @@ public static class WebChat
 
         sb.Append("</div>");
         return sb.ToString();
+    }
+
+    /// <summary>A short human description of the set channel modes (empty when none set).</summary>
+    private static string DescribeModes(ChannelMode modes)
+    {
+        if (modes == ChannelMode.None)
+        {
+            return "(no modes set)";
+        }
+
+        var parts = new List<string>();
+        if ((modes & ChannelMode.Secret) != 0)
+        {
+            parts.Add("secret");
+        }
+
+        if ((modes & ChannelMode.Private) != 0)
+        {
+            parts.Add("private");
+        }
+
+        if ((modes & ChannelMode.TopicLocked) != 0)
+        {
+            parts.Add("topic-locked");
+        }
+
+        if ((modes & ChannelMode.Invisible) != 0)
+        {
+            parts.Add("invisible");
+        }
+
+        if ((modes & ChannelMode.Moderated) != 0)
+        {
+            parts.Add("moderated");
+        }
+
+        if ((modes & ChannelMode.Local) != 0)
+        {
+            parts.Add("local");
+        }
+
+        return string.Join(", ", parts);
     }
 
     private static string RenderPresent(IReadOnlyList<NetworkUser> users, string me)
@@ -399,6 +517,9 @@ public static class WebChat
         table{border-collapse:collapse;width:100%}
         th,td{text-align:left;padding:.25rem .5rem;border-bottom:1px solid #ddd8cf;font-size:.92rem}
         .err{color:#a32014}
+        .ok{color:#1c7a2e}
+        .modes code{background:#eee9df;padding:0 .3rem;border-radius:3px}
+        .awayform,.operform,.modeform{margin:.4rem 0}
         input,select,textarea{font:inherit}
         button{font:inherit;padding:.2rem .8rem}
         .dim{color:#8a857c}

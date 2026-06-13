@@ -179,10 +179,63 @@ public sealed class HostLinkEngine
                     HubEvents = [new ConversEvent.HostLoop(loop.Detail)],
                     DropReason = $"/..LOOP received: {loop.Detail}",
                 };
+
+            case HostRoute route:
+                // /..ROUT — answer the route query at the link layer (SPECS line 126). As a strict leaf we
+                // are not transit: we reply with the single hop we know (us → parent → dest) and NEVER
+                // forward, regardless of the TTL (the loop/TTL guard — design decision 1).
+                return new EngineStep { OutboundCommands = [RouteReply(route)] };
+
+            case HostSysInfo sysi:
+                // /..SYSI — answer with our system information when it is for us or "all" (SPECS line 136).
+                // We never forward (strict leaf, no transit); a query for some other host is simply ignored.
+                return new EngineStep { OutboundCommands = SysInfoReplies(sysi) };
         }
 
         ConversEvent? @event = HostBridge.ToEvent(command);
         return @event is null ? EngineStep.None : new EngineStep { HubEvents = [@event] };
+    }
+
+    /// <summary>The reserved <c>/..UMSG</c> sender for a system-generated reply (route / sysinfo).</summary>
+    private const string SystemSender = "conversd";
+
+    /// <summary>
+    /// The strict-leaf <c>/..ROUT</c> reply: a single conversd-formatted route notice to the querying user
+    /// showing the one route we can offer (us → our parent → the destination). We hold no transit table,
+    /// so this is best-effort and never forwarded (the TTL is ignored — design decision 1).
+    /// </summary>
+    private HostUserMessage RouteReply(HostRoute route)
+    {
+        string parent = PeerHostName.Length == 0 ? "(uplink)" : PeerHostName;
+        string text = $"*** route: {_options.HostName} -> {parent} -> {route.Dest}";
+        return new HostUserMessage(SystemSender, route.User, text);
+    }
+
+    /// <summary>
+    /// The strict-leaf <c>/..SYSI</c> reply: our identity / version line plus the configured sysinfo string
+    /// when the request targets us or "all" (SPECS line 136). A request for some other host is not for us
+    /// to answer (we are no transit), so it yields no reply. Returned as conversd-formatted UMSGs.
+    /// </summary>
+    private List<HostCommand> SysInfoReplies(HostSysInfo sysi)
+    {
+        bool forUs = string.Equals(sysi.Host, _options.HostName, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(sysi.Host, "all", StringComparison.OrdinalIgnoreCase);
+        if (!forUs)
+        {
+            return [];
+        }
+
+        var replies = new List<HostCommand>
+        {
+            new HostUserMessage(SystemSender, sysi.User,
+                $"*** {_options.HostName}: pdn-convers {_options.Software} (strict leaf)"),
+        };
+        if (_options.SysInfo.Length != 0)
+        {
+            replies.Add(new HostUserMessage(SystemSender, sysi.User, $"*** {_options.HostName}: {_options.SysInfo}"));
+        }
+
+        return replies;
     }
 
     private void RecordPong(long reportedTime)

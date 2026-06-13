@@ -40,6 +40,20 @@ public abstract record ConsoleIntent
     /// <summary>Mark away with <paramref name="Text"/> (empty = back).</summary>
     public sealed record Away(string Text) : ConsoleIntent;
 
+    /// <summary>
+    /// Show or set channel modes (<c>/..MODE</c>). <paramref name="Channel"/> null = the current channel.
+    /// <paramref name="Options"/> empty = show the current modes; otherwise it is the verbatim toggle
+    /// string (e.g. <c>+mt</c>, <c>-s</c>) to apply.
+    /// </summary>
+    public sealed record Mode(int? Channel, string Options) : ConsoleIntent;
+
+    /// <summary>
+    /// Operator login (<c>/..OPER</c> semantics): authenticate with the node sysop
+    /// <paramref name="Secret"/> to gain operator status. Empty secret is a request the session refuses
+    /// with a usage hint.
+    /// </summary>
+    public sealed record Oper(string Secret) : ConsoleIntent;
+
     /// <summary>Leave the current channel (and sign off when it is the only one).</summary>
     public sealed record Leave(string Reason) : ConsoleIntent;
 

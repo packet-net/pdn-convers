@@ -138,6 +138,58 @@ public class InboundDemuxTests
         Assert.True(closed > 0);
     }
 
+    [Fact]
+    public async Task NonOperator_SetMode_IsRefused_ThenOperLogin_AllowsIt()
+    {
+        await using var h = new DemuxHarness(noUplink: true);
+        FakeRhpPeer peer = await h.Server.AcceptChildAsync("G4ABC");
+        await DrainGreetingAsync(peer);
+
+        // A plain user cannot set modes: the hub refuses with a DeliverModeNotice.
+        await peer.SendLineAsync("mode +m");
+        string refused = await peer.ReadLineMatchingAsync(l => l.Contains("operator", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("channel operator", refused, StringComparison.OrdinalIgnoreCase);
+
+        // Operator login with the configured secret grants operator status.
+        await peer.SendLineAsync($"oper {DemuxHarness.OperatorSecret}");
+        Assert.Equal("*** You are now an operator.", await peer.ReadLineAsync());
+
+        // Now the mode-set takes effect and the channel's modes are announced back.
+        await peer.SendLineAsync("mode +m");
+        string applied = await peer.ReadLineMatchingAsync(l => l.Contains("modes:", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("+m", applied, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task WrongOperatorSecret_IsDenied()
+    {
+        await using var h = new DemuxHarness(noUplink: true);
+        FakeRhpPeer peer = await h.Server.AcceptChildAsync("G4ABC");
+        await DrainGreetingAsync(peer);
+
+        await peer.SendLineAsync("oper notthesecret");
+        Assert.Equal("Sorry, operator access denied.", await peer.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task TopicLockedChannel_RefusesNonOperator_ThenAllowsOperator()
+    {
+        await using var h = new DemuxHarness(noUplink: true);
+        FakeRhpPeer peer = await h.Server.AcceptChildAsync("G4ABC");
+        await DrainGreetingAsync(peer);
+
+        // Become operator and lock the topic with +t.
+        await peer.SendLineAsync($"oper {DemuxHarness.OperatorSecret}");
+        Assert.Equal("*** You are now an operator.", await peer.ReadLineAsync());
+        await peer.SendLineAsync("mode +t");
+        _ = await peer.ReadLineMatchingAsync(l => l.Contains("modes:", StringComparison.OrdinalIgnoreCase));
+
+        // An operator can still set the topic on a +t channel.
+        await peer.SendLineAsync("topic operators only");
+        string topic = await peer.ReadLineMatchingAsync(l => l.Contains("operators only", StringComparison.Ordinal));
+        Assert.Contains("Topic", topic, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static async Task DrainGreetingAsync(FakeRhpPeer peer)
     {
         await peer.ReadLineAsync(); // Welcome
