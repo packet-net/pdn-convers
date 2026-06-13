@@ -109,6 +109,7 @@ public static class HostComposition
             HostName = HostNameFor(config, callsign),
             Password = string.IsNullOrEmpty(config.Uplink.Password) ? null : config.Uplink.Password,
             SysInfo = config.Sysinfo,
+            OfferCompression = config.Uplink.Compression,
         };
         builder.Services.AddSingleton(sp => new HostLink(
             hostLinkOptions,
@@ -179,6 +180,7 @@ public static class HostComposition
             peer = link.PeerHostName,
             roundTripMs = link.LastRoundTripMs,
             downstreamPeers = link.DownstreamPeerCount,
+            compression = link.CompressionEngaged,
         }));
 
         // W5b — the web chat tile (pdn-bbs webmail style): server-rendered, gateway identity is the auth

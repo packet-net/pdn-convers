@@ -44,8 +44,18 @@ public class ConversHostConfigTests
         Assert.Equal(2723, config.DefaultChannel);
         Assert.Equal("127.0.0.1", config.Web.Bind);
         Assert.Null(config.Uplink.Provider);    // no parent yet — uplink unset
+        Assert.False(config.Uplink.Compression); // we do not INITIATE //COMP by default (we still reciprocate)
         Assert.Equal("", config.OperatorSecret); // operator login disabled by default
         Assert.Equal("", config.Sysinfo);
+    }
+
+    [Fact]
+    public void Uplink_Compression_ParsesWhenEnabled()
+    {
+        ConversHostConfig config = ConversHostConfigFile.Parse(
+            "uplink:\n  provider: tcp\n  compression: true\n");
+
+        Assert.True(config.Uplink.Compression);
     }
 
     [Fact]

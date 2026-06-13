@@ -127,6 +127,17 @@ public sealed record UplinkConfig
     /// <summary>Password the parent's <c>Access … HOST</c> requires, if any (host.c check_password).</summary>
     public string? Password { get; init; }
 
+    /// <summary>
+    /// Whether <em>we</em> initiate the conversd-saupp Huffman compression offer (<c>//COMP 1</c>) on the host
+    /// link (both the uplink and accepted downstream peers) once the <c>/..HOST</c> handshake completes.
+    /// <b>Off by default</b> — the safe, no-regression posture: initiating arms our transmit side, so it only
+    /// belongs toward a peer known to honour host-link compression (stock conversd honours <c>/comp</c> on
+    /// USER links only). Regardless of this flag we always reciprocate a peer's own <c>//COMP 1</c>, so a
+    /// peer that offers compression first still gets a compressed link both ways. Set true only toward a
+    /// known-supporting parent/peer.
+    /// </summary>
+    public bool Compression { get; init; }
+
     /// <summary>RF provider: the neighbour convers node callsign to RHP-<c>open</c>.</summary>
     public RfUplinkConfig? Rf { get; init; }
 
@@ -264,6 +275,12 @@ public static class ConversHostConfigFile
           provider: null            # rf | tcp | null
           hostname: ""              # our convers hostname in the /..HOST handshake (<= 9 chars, no domain)
           password: null            # if the parent's `Access HOST` requires one
+          compression: false        # initiate the conversd //COMP Huffman compression offer after the
+                                    # handshake. OFF by default (safe): initiating compresses our output, so
+                                    # only enable it toward a peer KNOWN to support host-link compression
+                                    # (stock conversd does //comp on USER links only). We always RECIPROCATE a
+                                    # peer's own //COMP offer regardless, so a supporting peer still gets a
+                                    # compressed link. Applies to the uplink AND accepted downstream peers.
           # rf:
           #   call: GB7XYZ          # the neighbour convers node to open over RF
           # tcp:

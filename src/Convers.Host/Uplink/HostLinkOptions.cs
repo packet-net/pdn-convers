@@ -37,6 +37,19 @@ public sealed record HostLinkOptions
     public string? Password { get; init; }
 
     /// <summary>
+    /// Whether <em>we</em> initiate the conversd-saupp Huffman compression offer (<c>//COMP 1</c>) on the host
+    /// link once the <c>/..HOST</c> handshake completes (the W7c codec wired into the live transport).
+    /// <b>Off by default</b> — the safe, no-regression posture: initiating arms our transmit side immediately
+    /// (the offer is conversd's in-band compression boundary), so a peer that does <em>not</em> support
+    /// host-link compression would mis-read our frames. Stock conversd honours <c>/comp</c> on USER links
+    /// only, never on a HOST peer link, so leave this off toward an unknown parent. Independently of this
+    /// flag, we <em>always reciprocate</em>: if the peer offers <c>//COMP 1</c> first we accept and the link
+    /// compresses both ways — so compression still "engages only when both sides agree". Enable this only
+    /// toward a peer known to honour host-link compression.
+    /// </summary>
+    public bool OfferCompression { get; init; }
+
+    /// <summary>
     /// The system-information string answered to an inbound <c>/..SYSI</c> for us (SPECS line 136: "at the
     /// MINIMUM, the email address of the convers sysop should be available"). The Host fills this from
     /// <c>convers.yaml</c>; empty means only the version/identity line is returned.

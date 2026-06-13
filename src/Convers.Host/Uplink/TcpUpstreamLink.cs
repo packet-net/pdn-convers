@@ -5,22 +5,23 @@ namespace Convers.Host.Uplink;
 
 /// <summary>
 /// The direct-TCP upstream provider (design decision 6): a socket to an internet convers hub (e.g.
-/// HubNA <c>44.68.41.2:3600</c>), Latin-1 line transport. Outbound lines are framed with
-/// <see cref="ConversWire.FrameLine"/> (LF terminator — the canonical TCP terminator); inbound bytes are
-/// split on CR/LF into terminator-stripped lines. One instance models one dial; the
-/// <see cref="HostLink"/> obtains a fresh one per (re)connect via <see cref="TcpUpstreamLinkFactory"/>.
+/// HubNA <c>44.68.41.2:3600</c>), Latin-1 line transport. Outbound lines are framed with an LF terminator
+/// (the canonical TCP terminator) and inbound bytes split on CR/LF into terminator-stripped lines, all via
+/// the shared <see cref="CompressingLineTransport"/> — which also carries the conversd-saupp Huffman
+/// compression once <c>//COMP</c> is negotiated. One instance models one dial; the <see cref="HostLink"/>
+/// obtains a fresh one per (re)connect via <see cref="TcpUpstreamLinkFactory"/>.
 /// </summary>
 public sealed class TcpUpstreamLink : IUpstreamLink
 {
     private readonly TcpClient _client;
     private readonly NetworkStream _stream;
-    private readonly Queue<string> _pending = new();
-    private byte[] _remainder = [];
+    private readonly CompressingLineTransport _transport;
 
     private TcpUpstreamLink(TcpClient client)
     {
         _client = client;
         _stream = client.GetStream();
+        _transport = new CompressingLineTransport(WriteAsync, ReadAsync, terminator: '\n');
     }
 
     /// <summary>Dials <paramref name="host"/>:<paramref name="port"/> and returns the connected link.</summary>
@@ -42,44 +43,31 @@ public sealed class TcpUpstreamLink : IUpstreamLink
     }
 
     /// <inheritdoc/>
-    public async Task SendLineAsync(string line, CancellationToken cancellationToken)
-    {
-        byte[] framed = ConversWire.FrameLine(line);
-        await _stream.WriteAsync(framed, cancellationToken).ConfigureAwait(false);
-        await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
+    public Task SendLineAsync(string line, CancellationToken cancellationToken) =>
+        _transport.SendLineAsync(line, cancellationToken);
 
     /// <inheritdoc/>
-    public async Task<string?> ReceiveLineAsync(CancellationToken cancellationToken)
-    {
-        while (_pending.Count == 0)
-        {
-            var buffer = new byte[4096];
-            int read;
-            try
-            {
-                read = await _stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
-            {
-                return null;
-            }
+    public Task<string?> ReceiveLineAsync(CancellationToken cancellationToken) =>
+        _transport.ReceiveLineAsync(cancellationToken);
 
-            if (read == 0)
-            {
-                return null; // peer closed
-            }
+    /// <inheritdoc/>
+    public Task OfferCompressionAsync(CancellationToken cancellationToken) =>
+        _transport.OfferCompressionAsync(cancellationToken);
 
-            byte[] combined = Combine(_remainder, buffer.AsSpan(0, read));
-            IReadOnlyList<string> lines = ConversWire.SplitLines(combined, out _remainder);
-            foreach (string l in lines)
-            {
-                _pending.Enqueue(l);
-            }
-        }
+    /// <inheritdoc/>
+    public bool CompressionEngaged => _transport.CompressionEngaged;
 
-        return _pending.Dequeue();
-    }
+    /// <summary>
+    /// Arm compression for an enable trigger written out of band via <see cref="SendLineAsync"/> (e.g. a
+    /// USER-link <c>//comp on</c>, whose <c>//COMP 1</c> answer then arms the receive side). Used by the
+    /// host-link compression interop test against the real conversd USER link, where the enable token is the
+    /// <c>//comp</c> command rather than the raw host-link <c>//COMP 1</c> offer.
+    /// </summary>
+    internal Task NoteExternalCompressionOfferAsync(CancellationToken cancellationToken) =>
+        _transport.NoteExternalCompressionOfferAsync(cancellationToken);
+
+    /// <summary>Whether the receive side has engaged decompression (the peer's <c>//COMP 1</c> was consumed).</summary>
+    internal bool ReceiveCompressionEngaged => _transport.ReceiveCompressionEngaged;
 
     /// <inheritdoc/>
     public ValueTask DisposeAsync()
@@ -89,17 +77,26 @@ public sealed class TcpUpstreamLink : IUpstreamLink
         return ValueTask.CompletedTask;
     }
 
-    private static byte[] Combine(byte[] head, ReadOnlySpan<byte> tail)
+    private async Task WriteAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
     {
-        if (head.Length == 0)
+        await _stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<byte[]?> ReadAsync(CancellationToken cancellationToken)
+    {
+        var buffer = new byte[4096];
+        int read;
+        try
         {
-            return tail.ToArray();
+            read = await _stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
+        {
+            return null;
         }
 
-        var result = new byte[head.Length + tail.Length];
-        head.CopyTo(result, 0);
-        tail.CopyTo(result.AsSpan(head.Length));
-        return result;
+        return read == 0 ? null : buffer.AsSpan(0, read).ToArray();
     }
 }
 

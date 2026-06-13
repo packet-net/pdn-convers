@@ -36,6 +36,22 @@ public interface IUpstreamLink : IAsyncDisposable
     /// the stream has ended (the link is gone). After a null, no further lines arrive on this instance.
     /// </summary>
     Task<string?> ReceiveLineAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Offer host-link compression to the peer (the conversd <c>//COMP 1</c> exchange — W7-deferred plumbing):
+    /// send <c>//COMP 1</c> uncompressed and arm our transmit side so subsequent writes are Huffman-coded,
+    /// then both directions compress once the peer arms its side. A peer that does not understand or accept
+    /// <c>//COMP</c> simply runs uncompressed, so this is always safe to call. Drivers call it once, right
+    /// after the <c>/..HOST</c> handshake completes. The default is a no-op — a transport that does not carry
+    /// compression (the scripted test fake, or a provider opting out) ignores the offer and runs as today.
+    /// </summary>
+    Task OfferCompressionAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <summary>
+    /// Whether compression is currently engaged on the transmit side (we are Huffman-coding outbound bytes).
+    /// Surfaced for status/diagnostics; <see langword="false"/> on a transport without compression.
+    /// </summary>
+    bool CompressionEngaged => false;
 }
 
 /// <summary>

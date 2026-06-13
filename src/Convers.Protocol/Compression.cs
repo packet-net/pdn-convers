@@ -113,9 +113,24 @@ public static class Compression
     /// conversd's read loop does). A stored frame (header <see cref="StoredMarker"/>) decodes to the verbatim
     /// payload. Mirrors conversd <c>decstathuf</c>.
     /// </summary>
-    public static bool TryDecodeFrame(ReadOnlySpan<byte> frame, out byte[] decoded)
+    public static bool TryDecodeFrame(ReadOnlySpan<byte> frame, out byte[] decoded) =>
+        TryDecodeFrame(frame, out decoded, out _);
+
+    /// <summary>
+    /// Streaming overload of <see cref="TryDecodeFrame(ReadOnlySpan{byte}, out byte[])"/> that also reports
+    /// how many bytes of <paramref name="frame"/> the decoded frame consumed (<paramref name="bytesConsumed"/>).
+    /// This is what makes a <em>buffer</em> of back-to-back compressed frames decodable: a Huffman frame is
+    /// self-delimiting (its one-byte header gives the decoded length, and the decode stops the instant that
+    /// many symbols are produced), so the caller advances by <paramref name="bytesConsumed"/> and decodes the
+    /// next frame. A stored frame (header <see cref="StoredMarker"/>) is <em>not</em> content-delimited —
+    /// conversd sizes it by the socket read boundary — so it consumes the whole remaining span, exactly as
+    /// conversd's <c>decstathuf</c> does with <c>srclen</c>. On a decode failure <paramref name="bytesConsumed"/>
+    /// is 0 and the caller falls back to treating the bytes verbatim (the conversd read-loop resilience).
+    /// </summary>
+    public static bool TryDecodeFrame(ReadOnlySpan<byte> frame, out byte[] decoded, out int bytesConsumed)
     {
         decoded = [];
+        bytesConsumed = 0;
         if (frame.Length < 2)
         {
             return false; // conversd: clen < 2 is treated as undecodable
@@ -125,8 +140,9 @@ public static class Compression
         int srcLen = frame.Length - 1; // payload length after the header
         if (destLen == 256)
         {
-            // Stored (uncompressed) copy.
+            // Stored (uncompressed) copy — sized by the read boundary, so it claims the whole span.
             decoded = frame.Slice(1).ToArray();
+            bytesConsumed = frame.Length;
             return true;
         }
 
@@ -167,6 +183,16 @@ public static class Compression
                     if (written >= destLen)
                     {
                         decoded = output;
+                        // Compute how many wire bytes this frame actually occupied (so a buffer of back-to-
+                        // back frames can be walked). A leaf emits its symbol BEFORE the current bit is
+                        // consumed, so the byte at srcIndex contributes to this frame only if we have already
+                        // taken at least one bit from it (bitmask < 0x80). If bitmask is still 0x80 we have
+                        // just stepped onto srcIndex and read nothing from it, so the frame ended at the
+                        // previous byte: consume up to srcIndex (header + payload bytes before it). Otherwise
+                        // srcIndex itself is partially read (the encoder zero-pads its final byte), so it is
+                        // part of the frame: consume srcIndex + 1.
+                        int consumed = bitmask == 0x80 ? srcIndex : srcIndex + 1;
+                        bytesConsumed = Math.Min(consumed, frame.Length);
                         return true;
                     }
 

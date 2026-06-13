@@ -117,6 +117,13 @@ public sealed class HostLink : IAsyncDisposable
     public string PeerHostName => _peerHostName;
 
     /// <summary>
+    /// Whether host-link compression is currently engaged on the uplink's transmit side (the conversd-saupp
+    /// Huffman codec, negotiated via <c>//COMP</c>). <see langword="false"/> when the link is down, the peer
+    /// did not accept the offer, or compression is disabled — surfaced for status/diagnostics.
+    /// </summary>
+    public bool CompressionEngaged => _link?.CompressionEngaged ?? false;
+
+    /// <summary>
     /// Submit a local-originated domain event (an RF/web user's join/say/leave …). It is applied to the
     /// hub on the link's owning loop; the hub's uplink-bound actions are sent to the parent and its
     /// local-bound actions delivered to the <see cref="ILocalDelivery"/> sink. Queued even while the link
@@ -627,6 +634,16 @@ public sealed class HostLink : IAsyncDisposable
         MarkUp();
         _peerHostName = engine.PeerHostName;
         LogEstablished(_logger, engine.PeerHostName, FacilitiesCodec.Format(engine.NegotiatedFacilities), null);
+
+        // Offer host-link compression (conversd-saupp Huffman, the W7c codec) when configured. Offering arms
+        // our transmit side immediately (conversd's in-band //COMP boundary), so the presence re-announce
+        // below is sent compressed — only enable OfferCompression toward a peer known to honour host-link
+        // compression (HostLinkOptions documents this; default off). A peer that opens negotiation itself is
+        // always reciprocated regardless of this flag.
+        if (_options.OfferCompression)
+        {
+            await link.OfferCompressionAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         foreach (NetworkUser user in _hub.NetworkUsers)
         {

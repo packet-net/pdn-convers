@@ -41,10 +41,16 @@ public sealed class DownstreamPeerSession : IPeerSink
     private readonly TimeSpan _tickInterval;
 
     // Outbound queue: Enqueue (called from the hub's owning loop) must never block, so it writes here and a
-    // dedicated writer task drains it onto the transport in order.
-    private readonly Channel<HostCommand> _outbound =
-        System.Threading.Channels.Channel.CreateUnbounded<HostCommand>(
+    // dedicated writer task drains it onto the transport in order. An item is either a host command to send
+    // or the "offer compression now" marker — routing the //COMP offer through the SAME single writer keeps
+    // it strictly ordered AFTER the handshake reply on the wire (so the reply goes out uncompressed before
+    // our transmit side arms), which a direct call could not guarantee against the queued writer.
+    private readonly Channel<OutboundItem> _outbound =
+        System.Threading.Channels.Channel.CreateUnbounded<OutboundItem>(
             new UnboundedChannelOptions { SingleReader = true });
+
+    /// <summary>One outbound writer item: a command to send, or the compression-offer marker.</summary>
+    private readonly record struct OutboundItem(HostCommand? Command, bool OfferCompression);
 
     private volatile string _peerHostName = string.Empty;
 
@@ -86,7 +92,7 @@ public sealed class DownstreamPeerSession : IPeerSink
     public void Enqueue(HostCommand command)
     {
         ArgumentNullException.ThrowIfNull(command);
-        _outbound.Writer.TryWrite(command);
+        _outbound.Writer.TryWrite(new OutboundItem(command, OfferCompression: false));
     }
 
     /// <summary>
@@ -135,6 +141,18 @@ public sealed class DownstreamPeerSession : IPeerSink
                         registered = true;
                         LogEstablished(_logger, PeerId, engine.PeerHostName,
                             FacilitiesCodec.Format(engine.NegotiatedFacilities), null);
+
+                        // Offer host-link compression to the downstream peer (the W7c Huffman codec). Queued
+                        // through the single writer so it lands AFTER the /..HOST reply (sent uncompressed)
+                        // but BEFORE the presence dump — a reciprocating peer then receives the (often large)
+                        // announce compressed. Safe to offer: a peer that ignores //COMP just reads our
+                        // compressed output as undecodable and drops; we only offer toward peers configured to
+                        // support it (uplink.compression), conversd's posture.
+                        if (_options.OfferCompression)
+                        {
+                            _outbound.Writer.TryWrite(new OutboundItem(Command: null, OfferCompression: true));
+                        }
+
                         await AnnouncePresenceAsync(cancellationToken).ConfigureAwait(false);
                         foreach (string early in earlyContent)
                         {
@@ -293,9 +311,17 @@ public sealed class DownstreamPeerSession : IPeerSink
     {
         try
         {
-            await foreach (HostCommand command in _outbound.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            await foreach (OutboundItem item in _outbound.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
-                await _transport.SendLineAsync(HostCommandCodec.Format(command), cancellationToken).ConfigureAwait(false);
+                if (item.OfferCompression)
+                {
+                    // The //COMP offer, ordered after the handshake reply and before the presence dump.
+                    await _transport.OfferCompressionAsync(cancellationToken).ConfigureAwait(false);
+                }
+                else if (item.Command is { } command)
+                {
+                    await _transport.SendLineAsync(HostCommandCodec.Format(command), cancellationToken).ConfigureAwait(false);
+                }
             }
         }
         catch (Exception ex) when (ex is OperationCanceledException or ChannelClosedException or IOException or InvalidOperationException)

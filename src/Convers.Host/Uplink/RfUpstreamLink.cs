@@ -1,26 +1,28 @@
-using System.Text;
 using Convers.Host.Rhp;
-using Convers.Protocol;
 
 namespace Convers.Host.Uplink;
 
 /// <summary>
 /// The RF-via-RHP upstream provider (design decision 6, the pdn-native path): dials a neighbouring
 /// convers node over RHP <c>open</c>(Active) from our bound callsign (<c>config.Uplink.Rf.Call</c>), and
-/// carries the convers wire as Latin-1 lines over the resulting AX.25 stream. Outbound lines get a CR
-/// terminator (the AX.25 line discipline); inbound bytes are split on CR/LF into terminator-stripped
-/// lines (<see cref="LineAssembler"/>-equivalent via <see cref="ConversWire.SplitLines"/>). One instance
-/// models one dial; the <see cref="HostLink"/> redials via <see cref="RfUpstreamLinkFactory"/> on loss.
+/// carries the convers wire as Latin-1 lines over the resulting AX.25 stream via the shared
+/// <see cref="CompressingLineTransport"/>. Outbound lines get a CR terminator (the AX.25 line discipline);
+/// inbound bytes are CR/LF-split; the transport also applies the conversd-saupp Huffman compression once
+/// <c>//COMP</c> is negotiated. One instance models one dial; the <see cref="HostLink"/> redials via
+/// <see cref="RfUpstreamLinkFactory"/> on loss.
 /// </summary>
 public sealed class RfUpstreamLink : IUpstreamLink
 {
     private readonly RhpChildConnection _child;
-    private readonly Queue<string> _pending = new();
-    private byte[] _remainder = [];
+    private readonly CompressingLineTransport _transport;
 
     private RfUpstreamLink(RhpChildConnection child)
     {
         _child = child;
+        _transport = new CompressingLineTransport(
+            (bytes, ct) => _child.SendAsync(bytes, ct),
+            ct => _child.ReceiveAsync(ct).AsTask(),
+            terminator: '\r');
     }
 
     /// <summary>Opens an RHP Active connection to <paramref name="remote"/> and returns the link.</summary>
@@ -33,53 +35,24 @@ public sealed class RfUpstreamLink : IUpstreamLink
     }
 
     /// <inheritdoc/>
-    public async Task SendLineAsync(string line, CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(line);
-        // AX.25 line discipline is CR; the wire body carries no terminator, so append CR here.
-        string framed = line.Length != 0 && (line[^1] == '\r' || line[^1] == '\n') ? line : line + "\r";
-        await _child.SendAsync(Encoding.Latin1.GetBytes(framed), cancellationToken).ConfigureAwait(false);
-    }
+    public Task SendLineAsync(string line, CancellationToken cancellationToken) =>
+        _transport.SendLineAsync(line, cancellationToken);
 
     /// <inheritdoc/>
-    public async Task<string?> ReceiveLineAsync(CancellationToken cancellationToken)
-    {
-        while (_pending.Count == 0)
-        {
-            byte[]? data = await _child.ReceiveAsync(cancellationToken).ConfigureAwait(false);
-            if (data is null)
-            {
-                return null; // stream closed
-            }
+    public Task<string?> ReceiveLineAsync(CancellationToken cancellationToken) =>
+        _transport.ReceiveLineAsync(cancellationToken);
 
-            byte[] combined = Combine(_remainder, data);
-            IReadOnlyList<string> lines = ConversWire.SplitLines(combined, out _remainder);
-            foreach (string l in lines)
-            {
-                _pending.Enqueue(l);
-            }
-        }
+    /// <inheritdoc/>
+    public Task OfferCompressionAsync(CancellationToken cancellationToken) =>
+        _transport.OfferCompressionAsync(cancellationToken);
 
-        return _pending.Dequeue();
-    }
+    /// <inheritdoc/>
+    public bool CompressionEngaged => _transport.CompressionEngaged;
 
     /// <inheritdoc/>
     public async ValueTask DisposeAsync()
     {
         await _child.CloseAsync(CancellationToken.None).ConfigureAwait(false);
-    }
-
-    private static byte[] Combine(byte[] head, ReadOnlySpan<byte> tail)
-    {
-        if (head.Length == 0)
-        {
-            return tail.ToArray();
-        }
-
-        var result = new byte[head.Length + tail.Length];
-        head.CopyTo(result, 0);
-        tail.CopyTo(result.AsSpan(head.Length));
-        return result;
     }
 }
 
