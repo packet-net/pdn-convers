@@ -4,9 +4,12 @@ A ground-up packet-radio **convers (round-table chat) node** for the [pdn](https
 
 Built in the vein of [`m0lte/pdn-bbs`](https://github.com/m0lte/pdn-bbs): strictly an **app package** that reaches the node only through public interfaces (RHPv2, the app-gateway web identity contract, a `pdn-app.yaml` manifest). pdn contains zero convers-specific code.
 
-> **Status: W0 scaffold.** The four-project solution, packaging, CI, manifest and the conversd
-> docker oracle are in place and build/test green; the protocol/domain/console/host logic is the
-> work of waves W1–W7. Start with **[`HANDOVER.md`](HANDOVER.md)**, then [`docs/design.md`](docs/design.md).
+> **Status: W0–W6 complete (W7 in progress).** The full node is built on `main` — protocol, domain
+> (+ a full chat log), console, host, RF + web tile, and the conversd-oracle both-directions interop
+> suite — and it works **end-to-end**: an RF/web user chats on a real convers channel through the
+> uplink, a network user's reply comes back, all logged (oracle-proven, CI-enforced). 443 unit + 6
+> interop tests, 0 warnings. W7 (the optional SHOULD wave) is underway. Start with
+> **[`HANDOVER.md`](HANDOVER.md)**, then [`docs/design.md`](docs/design.md).
 
 ## Layout
 

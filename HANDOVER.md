@@ -1,8 +1,18 @@
 # pdn-convers — handover package
 
-**Purpose:** everything a fresh context needs to start building `m0lte/pdn-convers` — a ground-up packet-radio convers (round-table chat) node for the pdn platform — without re-deriving the research. Authored 2026-06-12 for Tom M0LTE.
+> **Status (2026-06-13): the build is well underway.** Waves **W0–W6 are merged** and the node works
+> **end-to-end** — an RF/web user chats on a real convers channel through the uplink, a network user's
+> message comes back, and everything is logged; proven live against the conversd oracle and CI-enforced
+> both directions. **W7 (the optional SHOULD wave) is in progress.** This file began as the from-zero
+> bootstrap; it is now the project's orientation + status doc. Live wave-by-wave state lives in the
+> memory `pdn-convers-status.md`; the architecture is `docs/design.md`.
 
-> Read order: this file → `design.md` (the full architecture + build waves) → `reference/SPECS.txt` (the convers host-protocol spec). The C reference implementation is vendored under `reference/conversd-saupp/`.
+**What it is:** `m0lte/pdn-convers` — a ground-up packet-radio convers (round-table chat) node for the
+pdn platform, built in the vein of `m0lte/pdn-bbs`. Authored 2026-06-12 for Tom M0LTE.
+
+> Read order: this file → `docs/design.md` (architecture + build-wave status) → `reference/SPECS.txt`
+> (the convers host-protocol spec). The C reference implementation is vendored under
+> `reference/conversd-saupp/` (and built as the docker oracle under `docker/`).
 
 ---
 
@@ -10,7 +20,7 @@
 
 Give pdn's RF users (and the node owner via a web tile) a first-class interface to the worldwide **convers network** ("Tampa PingPong" / WW Convers; the `conversd-saupp` lineage). pdn-convers joins that network as a **single leaf node** over one upstream host link and presents every local pdn user as an authenticated convers user. Built in the exact vein of **`m0lte/pdn-bbs`** (the template repo): C#/.NET, strictly layered, app-package-only (talks to the node solely over RHPv2), plain-language UX, SQLite state, `.deb` packaging, oracle-first testing.
 
-Full design + rationale: **`design.md`** in this folder (mirror of pdn-bbs's `docs/design.md` style — architecture, 10 load-bearing decisions, W0–W7 build waves, release pipeline, `pdn-app.yaml` sketch).
+Full design + rationale: **`docs/design.md`** (architecture, 10 load-bearing decisions, W0–W7 build waves, release pipeline, `pdn-app.yaml` sketch).
 
 ## 2. Settled decisions (Tom, 2026-06-12)
 
@@ -20,14 +30,14 @@ Full design + rationale: **`design.md`** in this folder (mirror of pdn-bbs's `do
 | Downstream peering | **v1 is leaf-only** (users in, one uplink out). Accepting downstream peers is **deferred to W7**. | InboundDemux treats every inbound RF connect as a USER; no inbound `/..HOST` handling in v1. Simplifies the demux (design decision 3). |
 | Default channel | **Fixed default channel** for packet.net users — a `defaultChannel` config key. | Scaffold ships placeholder `3333`; Tom picks the real public number (256–32767, avoid collisions) before go-live. Users land there on connect without choosing. |
 
-These resolve the three "Open decisions for Tom" at the bottom of `design.md`.
+These three are now the "Resolved decisions" section at the bottom of `docs/design.md`.
 
-## 3. Current status
+## 3. Current status (2026-06-13)
 
-- **Research: complete.** Protocol, ports, hubs, peering model, canonical source all identified and pinned (see memory `convers-integration.md`).
-- **Design: complete.** `design.md` is ready to become the new repo's `docs/design.md`.
-- **Reference source: vendored** under `reference/conversd-saupp/` (74 files; the DL9SAU `conversd-saupp` CVS export). Canonical online copy: `http://x-berg.in-berlin.de/cgi-bin/viewcvs.cgi/ampr/conversd-saupp/` (`?view=tar`).
-- **Code: not started.** Next action is **W0 scaffold** (§6).
+- **W0–W6 merged.** The four-project solution (`Convers.Protocol`/`Core`/`Console`/`Host`) is built on `main`: the wire codec + USER/HOST command sets + connection FSM (W1), the `ConversHub` presence model + SQLite persistence incl. a full chat log (W2 + chat-logging), the plain-language + classic console (W3), the upstream HostLink (W4), the RHP client + inbound demux + RF/TCP uplink providers + SSID probe-walk + the web chat tile (W5a/W5b), and the conversd-oracle both-directions interop suite (W6). **443 unit tests + 6 interop tests, 0 warnings;** both CI lanes green on the self-hosted runner.
+- **Proven working.** An RF/web user chats on a real convers channel through the uplink, a network user's message comes back, and everything (messages + presence, local + network origin) is logged — demonstrated live against the conversd docker oracle and CI-enforced both directions.
+- **W7 (optional SHOULD wave) in progress** — channel modes, `/..OPER`, away, topic propagation, `/..ROUT`/`/..SYSI`, link-time `p`, compression, downstream peering, classic niceties (§6).
+- **Reference source: vendored** under `reference/conversd-saupp/` (the DL9SAU `conversd-saupp` CVS export; canonical online copy `http://x-berg.in-berlin.de/cgi-bin/viewcvs.cgi/ampr/conversd-saupp/` `?view=tar`), and built as the docker oracle under `docker/`.
 
 ## 4. External prerequisite — BLOCKING for live network (Tom to action)
 
@@ -58,24 +68,23 @@ The build does **not** wait on this — W0–W6 develop and test against a local
 - Manifest: `pdn-app.yaml` — `manifest: 1`, `id: convers` (== package dir name), `capabilities: [network, web]`, `service.command: ./pdn-convers`, `ui.upstream: http://127.0.0.1:<port>` (MUST match `web.port` in `convers.yaml`). Sketch in `design.md`.
 - Packaging: per-arch `.deb` (amd64/arm64/armhf) under `/usr/share/packetnet/apps/convers`; state in `/var/lib/packetnet/apps/convers`; `publish-convers` workflow + `scripts/deploy-convers.sh` — clone from pdn-bbs `packaging/`, `scripts/`, `.github/workflows/`, `docs/release-pipeline.md`.
 
-## 6. First session: W0 scaffold (start here)
+## 6. Remaining work & how to continue
 
-1. `gh repo create m0lte/pdn-convers` (private/public per Tom). Add `docs/design.md` (this folder's `design.md`), and vendor `reference/conversd-saupp/` into the repo (e.g. `docs/reference/` or a `third_party/` dir) so the oracle + spec travel with the code. Commit `reference/SPECS.txt`.
-2. Clone the pdn-bbs skeleton conventions: `Directory.Build.props`, `Directory.Packages.props` (CPM), `.gitignore`, `pdn-convers.slnx`, `.github/workflows/ci.yml`, `packaging/`, `scripts/build-deb.sh` + `deploy-convers.sh`, `docs/release-pipeline.md`. Adapt ids `bbs`→`convers`.
-3. Create the four empty projects + test projects per `design.md` (`Convers.Protocol`, `Convers.Core`, `Convers.Console`, `Convers.Host` + `tests/*`). Enforce the dependency rule.
-4. Author `pdn-app.yaml` (sketch in `design.md`) and the first-run default `convers.yaml` (callsign `N0CALL`, `defaultChannel: 3333`, uplink block with both providers commented, sysop, web port).
-5. `docker/` oracle compose: build `conversd-saupp` from the vendored source, run one instance as the stand-in parent. (This is the W6 oracle, stood up early so W4 can test against it.)
-6. CI green on the self-hosted runner (packet.net conventions — note runner is RAM-capped 8 GB per `github-actions-runner-infra` memory; keep build parallelism modest).
-7. Empty-green test lanes per project. Tag nothing yet.
+The core build (W0–W6) is done. What's left:
 
-Then **W1** (`Convers.Protocol`) and **W2** (`Convers.Core`) can run in parallel as sub-agents — the spec + vendored source carry everything. W3 follows once Core interfaces pin. See `design.md` "Build waves" for the full W0–W7 sequence and dependencies.
+- **W7 — the optional SHOULD wave (in progress).** Channel modes (`/..MODE` +i/+l/+m/+p/+s/+t), `/..OPER`, away (`/..AWAY` new+old), `/..TOPI` persistence+propagation, `/..ROUT`/`/..SYSI`, link-time `p` measurement, compression/`u` extensions, the **downstream-peering toggle** (accept inbound HOST links — the deferred decision-4 feature), and classic-client niceties. Done in slices: **W7a** Core semantics (modes/away/topic) → **W7b** Host (oper/rout/sysi/p/compression/peering) + **W7c** Console surface.
+- **Real-world steps (Tom to action).** The lab `.deb` deploy (`scripts/deploy-convers.sh` → `root@packetdotnet`), and arranging a **parent convers node** so pdn-convers can join the live public network — still the one external prerequisite (§4).
+
+**To pick up the build:** read this file → `docs/design.md` (architecture + build-wave status) → the memory `pdn-convers-status.md` (live wave-by-wave state). Waves run as sub-agents off `main`, each a PR; **verify before merging** — `dotnet build -c Release` 0-warning, the unit lane (`--filter "Category!=Interop"`) green and stable under a flake-stress (the Host suite has socket/timing tests; pass an explicit state dir, never the process-global `PDN_APP_STATE`, and use poll-advance not a bare `Time.Advance`), and the interop lane (`--filter "Category=Interop"`) green against the docker oracle. CI runs both lanes on the self-hosted runner (RAM-capped 8 GB — keep parallelism modest).
 
 ## 7. Memory pointers (persist across contexts)
 
-- `convers-integration.md` — protocol/ports/hubs/peering, the conversd-saupp source location, and the decision record. Updated 2026-06-12 with the settled decisions + this handover's location.
-- `github-actions-runner-infra.md` — the CI runner is RAM-constrained (8 GB cap); relevant to W0 CI setup.
-- pdn-bbs itself (`m0lte/pdn-bbs`) is the canonical template for every pdn-app convention referenced here.
+- `pdn-convers-status.md` — the live wave-by-wave build status + what's settled/remaining.
+- `convers-callsign-autoderive.md` — the `<node-callsign>-<ssid>` auto-derivation (default SSID 4) + the SSID probe-walk.
+- `convers-chat-logging.md` — the full chat-log decision (channels + PMs + presence, kept forever).
+- `convers-oracle-docker.md` — docker availability + the verified conversd oracle.
+- `pdn-bbs-template.md` — `m0lte/pdn-bbs` is the canonical template for every pdn-app convention (RAM-capped 8 GB CI runner; clone it for reference patterns).
 
-## 8. Suggested first message for the fresh context
+## 8. Suggested first message for a fresh context
 
-> "Pick up the pdn-convers build. Read `C:\Users\tom\pdn-convers-handover\HANDOVER.md` then `design.md` in that folder. All three open decisions are settled (leaf-only v1, fixed default channel 3333 placeholder, no parent node yet — build both uplink providers). Start W0 scaffold: create the `m0lte/pdn-convers` repo, clone the pdn-bbs conventions, stand up the four projects + the conversd-saupp docker oracle. Then hand W1/W2 to sub-agents."
+> "Pick up the pdn-convers build. Read `HANDOVER.md`, then the memory `pdn-convers-status.md` and `docs/design.md`. W0–W6 are merged and the node works end-to-end both directions (oracle-proven); W7 (the optional SHOULD wave) is in progress — continue it in slices (W7a Core → W7b Host + W7c Console), each a verified PR off `main`."
