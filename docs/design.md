@@ -77,7 +77,9 @@ Dependency rule: Protocol and Core never reference Host; Console references Core
 
 ## Build waves
 
-- **W0** scaffold: repo, sln, CPM, CI (self-hosted runner, packet.net conventions), docs in-repo, empty-green test lanes, `pdn-app.yaml`, release/deploy scripts cloned from pdn-bbs.
+> Status (2026-06-13): **W0–W6 ✓ merged** (the node works end-to-end, both directions, oracle-proven). **W7 in progress** (W7a Core → W7b Host + W7c Console).
+
+- **W0** ✓ scaffold: repo, sln, CPM, CI (self-hosted runner, packet.net conventions), docs in-repo, empty-green test lanes, `pdn-app.yaml`, release/deploy scripts cloned from pdn-bbs.
 - **W1** `Convers.Protocol`: the `/`-codec, USER + HOST command sets, the UNKNOWN→USER/OBSERVER/HOST FSM, facility negotiation. Golden vectors captured from a real conversd. Sub-agent; SPECS + `user.c`/`host.c` carry everything.
 - **W2** `Convers.Core`: `ConversHub` model + SQLite persistence (personal text / nick / password / topics) + TimeProvider. Sub-agent, parallel with W1.
 - **W3** `Convers.Console`: plain-language chat surface + classic `/`-mode over fakes (parallel once Core interfaces pin).
@@ -109,9 +111,9 @@ ui:
   icon: chat
 ```
 
-## Open decisions for Tom
+## Resolved decisions
 
-1. **Uplink transport (decision 6)** — is packet.net's convers uplink an **RF neighbour** (RHP open, pdn-native) or an **internet hub** (direct TCP, needs 44Net/allowlist), or both? This is the only fork that affects deployment. Who's the intended parent node?
-2. **Inbound downstream peering** — v1 leaf-only (users in, one uplink out) is simplest and safest. Agreed to defer accepting downstream peers to W7?
-3. **Channel policy** — a fixed default channel for packet.net users, or free choice? Any local-only channels (conversd `+l`) you want reserved?
+1. **Uplink transport (decision 6)** — RESOLVED: **both** providers are built behind one `IUpstreamLink` (RF-via-RHP-`open` and direct-TCP-to-hub), selected by `convers.yaml` `uplink.provider`; the default is left unset until a parent node exists. A parent is still to be arranged (the one external prerequisite).
+2. **Inbound downstream peering** — RESOLVED: v1 is **leaf-only** (users in, one uplink out); accepting downstream HOST peers is the **W7** toggle (decision 4).
+3. **Channel policy** — RESOLVED: a **fixed default channel** (`defaultChannel`; placeholder **3333** — Tom to pick the real 256–32767 public number before go-live). Local-only channels are the conversd `+l` mode, handled in W7.
 ```
