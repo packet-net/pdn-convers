@@ -30,6 +30,15 @@ public sealed class ConversHub
     /// <summary>Per-channel topic + modes. Channels with no metadata are implied by membership.</summary>
     private readonly Dictionary<int, ChannelState> _channels = [];
 
+    /// <summary>Callsigns with global-operator status (<c>/..OPER</c> with channel == -1).</summary>
+    private readonly HashSet<string> _globalOps = new(StringComparer.Ordinal);
+
+    /// <summary>Channel-operator grants, keyed by channel, holding the set of operator callsigns.</summary>
+    private readonly Dictionary<int, HashSet<string>> _channelOps = [];
+
+    /// <summary>Standing channel invitations, keyed by callsign, holding the set of invited channels.</summary>
+    private readonly Dictionary<string, HashSet<int>> _invites = new(StringComparer.Ordinal);
+
     /// <summary>
     /// Constructs a hub for a leaf whose own host name is <paramref name="hostName"/> (how local
     /// users are presented upstream). When a <paramref name="store"/> is supplied, persisted topics
@@ -99,6 +108,26 @@ public sealed class ConversHub
     }
 
     /// <summary>
+    /// A <c>/who</c>-style listing of channels that have members and/or metadata, ordered by number.
+    /// Channels flagged secret (<c>+s</c>) or invisible (<c>+i</c>) are <b>hidden</b> from this
+    /// listing (their number/existence is not displayed, SPECS lines 97/101) — unless
+    /// <paramref name="includeHidden"/> is set, which a channel-operator/sysop view passes. A direct
+    /// <see cref="GetChannel"/> lookup is unaffected: a user who knows a channel can still query it.
+    /// </summary>
+    public IReadOnlyList<Channel> ListChannels(bool includeHidden = false)
+    {
+        IEnumerable<int> numbers = _users.Values.Select(u => u.Channel)
+            .Concat(_channels.Keys)
+            .Distinct();
+
+        return numbers
+            .Where(n => includeHidden || !ChannelModes.IsHidden(ModesOf(n)))
+            .OrderBy(n => n)
+            .Select(GetChannel)
+            .ToList();
+    }
+
+    /// <summary>
     /// Advances the model by one event and returns the fan-out actions to perform, in order. Pure
     /// with respect to I/O: the only side effects are the hub's own in-memory state and (when a
     /// store is configured) write-through of persisted topics / personal text. An event that has no
@@ -119,6 +148,8 @@ public sealed class ConversHub
             ConversEvent.LocalSetAway e => LocalSetAway(e),
             ConversEvent.LocalSetTopic e => LocalSetTopic(e),
             ConversEvent.LocalInvite e => LocalInvite(e),
+            ConversEvent.LocalSetMode e => LocalSetMode(e),
+            ConversEvent.LocalSetOperator e => LocalSetOperator(e),
             ConversEvent.LocalLeave e => LocalLeave(e),
             ConversEvent.HostUser e => HostUser(e),
             ConversEvent.HostChannelMessage e => HostChannelMessage(e),
@@ -127,6 +158,8 @@ public sealed class ConversHub
             ConversEvent.HostAway e => HostAway(e),
             ConversEvent.HostTopic e => HostTopic(e),
             ConversEvent.HostInvite e => HostInvite(e),
+            ConversEvent.HostMode e => HostMode(e),
+            ConversEvent.HostOper e => HostOper(e),
             ConversEvent.HostPing => [new ConversAction.SendPong(PongSentinelNoMeasurement)],
             ConversEvent.HostPong => [],
             ConversEvent.HostLoop e => [new ConversAction.DropUplink($"loop via {e.Host}")],
@@ -147,6 +180,14 @@ public sealed class ConversHub
         string call = Callsigns.Normalize(e.Callsign);
         DateTimeOffset now = _time.GetUtcNow();
 
+        // +p/+i invite-only: a fresh joiner with no standing invitation is refused. A user who was
+        // invited earlier (held in _invites) — or a global operator — is let in.
+        if (ChannelModes.RequiresInvite(ModesOf(e.Channel)) &&
+            !IsInvitedTo(call, e.Channel) && !IsGlobalOperator(call))
+        {
+            return [new ConversAction.DeliverModeNotice(e.SessionId, e.Channel, "That channel is invitation-only.")];
+        }
+
         // Hydrate persisted personal text / nickname so a returning user keeps their identity.
         UserProfile? profile = _store?.GetProfile(call);
         string personal = profile?.Personal ?? string.Empty;
@@ -159,6 +200,8 @@ public sealed class ConversHub
             Channel = e.Channel,
             Personal = personal,
             Nickname = nickname,
+            IsOperator = IsGlobalOperator(call),
+            InvitedChannels = InvitesFor(call),
             JoinedAt = now,
         };
         _sessions[e.SessionId] = session;
@@ -186,12 +229,22 @@ public sealed class ConversHub
             return [];
         }
 
+        // +p/+i invite-only also gates a switch into the channel.
+        if (ChannelModes.RequiresInvite(ModesOf(e.Channel)) &&
+            !session.IsOperator && !session.InvitedChannels.Contains(e.Channel))
+        {
+            return [new ConversAction.DeliverModeNotice(e.SessionId, e.Channel, "That channel is invitation-only.")];
+        }
+
         int from = session.Channel;
         DateTimeOffset now = _time.GetUtcNow();
         var actions = new List<ConversAction>();
         actions.AddRange(NotifyChannelLeave(from, session.Callsign, "switched channel", exceptSession: e.SessionId));
 
-        session = session with { Channel = e.Channel, JoinedAt = now };
+        // Channel-op status is per-channel: it does not follow the user to a new channel (unless a
+        // global operator). Recompute against the destination channel's op roster.
+        bool opOnNew = IsGlobalOperator(session.Callsign) || IsChannelOperator(session.Callsign, e.Channel);
+        session = session with { Channel = e.Channel, IsOperator = opOnNew, JoinedAt = now };
         _sessions[e.SessionId] = session;
         UpsertLocalUser(session);
 
@@ -208,11 +261,27 @@ public sealed class ConversHub
             return [];
         }
 
-        var actions = new List<ConversAction>
+        ChannelMode modes = ModesOf(session.Channel);
+
+        // +m moderated: only a channel-operator may write. Drop the message and tell the speaker.
+        if ((modes & ChannelMode.Moderated) != 0 && !session.IsOperator)
         {
-            // Upstream copy.
-            new ConversAction.SendChannelMessage(session.Callsign, session.Channel, e.Text),
-        };
+            return
+            [
+                new ConversAction.DeliverModeNotice(
+                    e.SessionId, session.Channel,
+                    "This is a moderated channel. Only channel operators may write."),
+            ];
+        }
+
+        var actions = new List<ConversAction>();
+
+        // +l local channel: text is not forwarded to links (SPECS line 98). Suppress the upstream copy.
+        if ((modes & ChannelMode.Local) == 0)
+        {
+            actions.Add(new ConversAction.SendChannelMessage(session.Callsign, session.Channel, e.Text));
+        }
+
         // Local copies to every other local user on the channel (the speaker echoes locally too via
         // the Host's own transport; the hub does not re-deliver to the originator).
         actions.AddRange(DeliverToChannel(session.Channel, session.Callsign, e.Text, exceptSession: e.SessionId));
@@ -300,6 +369,17 @@ public sealed class ConversHub
             return [];
         }
 
+        // +t topic-locked: only a channel-operator may set the topic (SPECS line 102).
+        if ((ModesOf(session.Channel) & ChannelMode.TopicLocked) != 0 && !session.IsOperator)
+        {
+            return
+            [
+                new ConversAction.DeliverModeNotice(
+                    e.SessionId, session.Channel,
+                    "The topic on this channel may be set by channel operators only."),
+            ];
+        }
+
         DateTimeOffset now = _time.GetUtcNow();
         string topic = e.Topic.Trim();
         ApplyTopic(session.Channel, topic, session.Callsign, now);
@@ -320,6 +400,7 @@ public sealed class ConversHub
         }
 
         string to = Callsigns.Normalize(e.ToUser);
+        RecordInvite(to, e.Channel);
         var actions = new List<ConversAction>();
         foreach (LocalSession target in _sessions.Values)
         {
@@ -331,6 +412,53 @@ public sealed class ConversHub
 
         actions.Add(new ConversAction.SendInvite(session.Callsign, to, e.Channel));
         return actions;
+    }
+
+    private List<ConversAction> LocalSetMode(ConversEvent.LocalSetMode e)
+    {
+        if (!_sessions.TryGetValue(e.SessionId, out LocalSession? session) || !ChannelNumber.IsValid(e.Channel))
+        {
+            return [];
+        }
+
+        // Only a channel-operator on the target channel (or a global operator) may change its modes
+        // (conversd mode_command()). Reject anyone else with a notice, change nothing.
+        if (!IsGlobalOperator(session.Callsign) && !IsChannelOperator(session.Callsign, e.Channel))
+        {
+            return
+            [
+                new ConversAction.DeliverModeNotice(
+                    e.SessionId, e.Channel, "You must be a channel operator to set modes."),
+            ];
+        }
+
+        ChannelMode before = ModesOf(e.Channel);
+        ChannelMode after = ChannelModes.Apply(before, e.Options, isChannelZero: e.Channel == ChannelNumber.Random);
+        if (after == before)
+        {
+            return [];
+        }
+
+        SetModes(e.Channel, after);
+
+        var actions = new List<ConversAction>
+        {
+            new ConversAction.SendMode(e.Channel, ChannelModes.ToWire(after)),
+        };
+        actions.AddRange(NotifyModeChange(e.Channel, after));
+        return actions;
+    }
+
+    private List<ConversAction> LocalSetOperator(ConversEvent.LocalSetOperator e)
+    {
+        if (!_sessions.TryGetValue(e.SessionId, out LocalSession? session))
+        {
+            return [];
+        }
+
+        ApplyOperator(session.Callsign, e.Channel, e.Grant);
+        RefreshSessionOpFlags(session.Callsign);
+        return [];
     }
 
     private List<ConversAction> LocalLeave(ConversEvent.LocalLeave e)
@@ -505,6 +633,7 @@ public sealed class ConversHub
 
         string user = Callsigns.Normalize(e.User);
         string from = Callsigns.Normalize(e.From);
+        RecordInvite(user, e.Channel);
         var actions = new List<ConversAction>();
         foreach (LocalSession target in _sessions.Values)
         {
@@ -515,6 +644,49 @@ public sealed class ConversHub
         }
 
         return actions;
+    }
+
+    private List<ConversAction> HostMode(ConversEvent.HostMode e)
+    {
+        if (!ChannelNumber.IsValid(e.Channel))
+        {
+            return [];
+        }
+
+        // The uplink is authoritative: apply the modes verbatim, no operator check. Channel 0's
+        // letter restriction still holds (matching conversd's own mode_command()).
+        ChannelMode before = ModesOf(e.Channel);
+        ChannelMode after = ChannelModes.Apply(before, e.Options, isChannelZero: e.Channel == ChannelNumber.Random);
+        if (after == before)
+        {
+            return [];
+        }
+
+        SetModes(e.Channel, after);
+        return NotifyModeChange(e.Channel, after);
+    }
+
+    private List<ConversAction> HostOper(ConversEvent.HostOper e)
+    {
+        string user = Callsigns.Normalize(e.User);
+        if (!Callsigns.IsValidName(user))
+        {
+            return [];
+        }
+
+        ApplyOperator(user, e.Channel, e.Grant);
+        RefreshSessionOpFlags(user);
+
+        // Reflect op status on the remote-user snapshot too, when we know the user. A user is shown
+        // as an operator if they are a global op or a channel-op on the channel they are currently on.
+        string host = Callsigns.Normalize(e.Host);
+        if (_users.TryGetValue((user, host), out NetworkUser? remote))
+        {
+            bool isOp = IsGlobalOperator(user) || IsChannelOperator(user, remote.Channel);
+            _users[(user, host)] = remote with { IsOperator = isOp };
+        }
+
+        return [];
     }
 
     // ---------------------------------------------------------------- helpers
@@ -533,11 +705,130 @@ public sealed class ConversHub
             Nickname = session.Nickname,
             Away = session.Away,
             IsObserver = false,
+            IsOperator = session.IsOperator,
             JoinedAt = session.JoinedAt,
         };
     }
 
     private void RemoveLocalUser(string callsign) => _users.Remove((callsign, HostName));
+
+    // ---------------------------------------------------------------- channel modes
+
+    /// <summary>The current modes of a channel (<see cref="ChannelMode.None"/> when it has no metadata).</summary>
+    private ChannelMode ModesOf(int channel) =>
+        _channels.TryGetValue(channel, out ChannelState? state) ? state.Modes : ChannelMode.None;
+
+    private void SetModes(int channel, ChannelMode modes)
+    {
+        _channels.TryGetValue(channel, out ChannelState? state);
+        state ??= new ChannelState();
+        _channels[channel] = state with { Modes = modes };
+    }
+
+    private List<ConversAction> NotifyModeChange(int channel, ChannelMode modes)
+    {
+        var actions = new List<ConversAction>();
+        foreach (LocalSession s in _sessions.Values)
+        {
+            if (s.Channel == channel)
+            {
+                actions.Add(new ConversAction.DeliverModeChange(s.Id, channel, modes));
+            }
+        }
+
+        return actions;
+    }
+
+    // ---------------------------------------------------------------- operator / invite state
+
+    private bool IsGlobalOperator(string callsign) => _globalOps.Contains(Callsigns.Normalize(callsign));
+
+    private bool IsChannelOperator(string callsign, int channel) =>
+        _channelOps.TryGetValue(channel, out HashSet<string>? ops) && ops.Contains(Callsigns.Normalize(callsign));
+
+    /// <summary>Grants or revokes operator status. <paramref name="channel"/> == -1 is the global role.</summary>
+    private void ApplyOperator(string callsign, int channel, bool grant)
+    {
+        string call = Callsigns.Normalize(callsign);
+        if (channel < 0)
+        {
+            if (grant)
+            {
+                _globalOps.Add(call);
+            }
+            else
+            {
+                _globalOps.Remove(call);
+            }
+
+            return;
+        }
+
+        if (grant)
+        {
+            if (!_channelOps.TryGetValue(channel, out HashSet<string>? ops))
+            {
+                ops = new HashSet<string>(StringComparer.Ordinal);
+                _channelOps[channel] = ops;
+            }
+
+            ops.Add(call);
+        }
+        else if (_channelOps.TryGetValue(channel, out HashSet<string>? ops))
+        {
+            ops.Remove(call);
+        }
+    }
+
+    /// <summary>Recomputes the op flag on a callsign's live session (and snapshot) after an op change.</summary>
+    private void RefreshSessionOpFlags(string callsign)
+    {
+        string call = Callsigns.Normalize(callsign);
+        foreach (LocalSession s in _sessions.Values.ToList())
+        {
+            if (!Callsigns.Equal(s.Callsign, call))
+            {
+                continue;
+            }
+
+            bool isOp = IsGlobalOperator(call) || IsChannelOperator(call, s.Channel);
+            if (isOp != s.IsOperator)
+            {
+                LocalSession updated = s with { IsOperator = isOp };
+                _sessions[s.Id] = updated;
+                UpsertLocalUser(updated);
+            }
+        }
+    }
+
+    private void RecordInvite(string callsign, int channel)
+    {
+        string call = Callsigns.Normalize(callsign);
+        if (!_invites.TryGetValue(call, out HashSet<int>? channels))
+        {
+            channels = [];
+            _invites[call] = channels;
+        }
+
+        channels.Add(channel);
+
+        // Reflect the invite on any live session for that callsign immediately.
+        foreach (LocalSession s in _sessions.Values.ToList())
+        {
+            if (Callsigns.Equal(s.Callsign, call))
+            {
+                _sessions[s.Id] = s with { InvitedChannels = InvitesFor(call) };
+            }
+        }
+    }
+
+    private bool IsInvitedTo(string callsign, int channel) =>
+        _invites.TryGetValue(Callsigns.Normalize(callsign), out HashSet<int>? channels) && channels.Contains(channel);
+
+    private IReadOnlySet<int> InvitesFor(string callsign) =>
+        _invites.TryGetValue(Callsigns.Normalize(callsign), out HashSet<int>? channels)
+            ? channels.ToHashSet()
+            : System.Collections.Immutable.ImmutableHashSet<int>.Empty;
 
     private NetworkUser? FindRemoteUser(string name)
     {

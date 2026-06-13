@@ -43,6 +43,13 @@ public sealed record NetworkUser
     /// </summary>
     public bool IsObserver { get; init; }
 
+    /// <summary>
+    /// True when the user holds channel-operator (or global-operator) status (<c>/..OPER</c>): the
+    /// status that exempts them from <c>+m</c> moderation and <c>+t</c> topic-lock on their channel.
+    /// Tracked so the <c>/who</c> snapshot can mark them.
+    /// </summary>
+    public bool IsOperator { get; init; }
+
     /// <summary>When the user last joined / switched channel (the <c>/..USER</c> timestamp).</summary>
     public DateTimeOffset JoinedAt { get; init; }
 }

@@ -39,6 +39,17 @@ public abstract record ConversAction
     /// <summary>Tell a local session the topic of a channel changed.</summary>
     public sealed record DeliverTopic(string SessionId, int Channel, string Topic, string SetBy) : ConversAction;
 
+    /// <summary>Tell a local session a channel's modes changed (the new mode set, after the toggle).</summary>
+    public sealed record DeliverModeChange(string SessionId, int Channel, ChannelMode Modes) : ConversAction;
+
+    /// <summary>
+    /// Tell a local session its request was refused by a channel-mode rule — e.g. a write to a
+    /// moderated (<c>+m</c>) channel by a non-operator, a topic-set on a topic-locked (<c>+t</c>)
+    /// channel by a non-operator, a mode-set by a non-operator, or a join to a private/invite-only
+    /// channel without an invitation. <paramref name="Reason"/> is a short human notice.
+    /// </summary>
+    public sealed record DeliverModeNotice(string SessionId, int Channel, string Reason) : ConversAction;
+
     // ---------------------------------------------------------------- to the uplink
 
     /// <summary>
@@ -67,6 +78,14 @@ public abstract record ConversAction
 
     /// <summary>Emit a <c>/..INVI</c> invitation upstream.</summary>
     public sealed record SendInvite(string From, string User, int Channel) : ConversAction;
+
+    /// <summary>
+    /// Emit a <c>/..MODE</c> channel-mode change upstream. <paramref name="Options"/> is the
+    /// canonical full mode string for the channel after the change (e.g. <c>"+mt"</c>, or
+    /// <c>"-"</c> when no modes remain), so the parent and the rest of the network converge on the
+    /// same mode set regardless of how the toggle was expressed.
+    /// </summary>
+    public sealed record SendMode(int Channel, string Options) : ConversAction;
 
     /// <summary>Emit a <c>/..PONG</c> upstream in answer to a ping, carrying our measured rtt (or a sentinel).</summary>
     public sealed record SendPong(long MillisecondsOrSentinel) : ConversAction;

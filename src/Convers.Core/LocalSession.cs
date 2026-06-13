@@ -33,6 +33,21 @@ public sealed record LocalSession
     /// <summary>True when the local user is away.</summary>
     public bool IsAway => Away.Length != 0;
 
+    /// <summary>
+    /// True when this user is a channel-operator on their current channel (or a global operator):
+    /// the status that satisfies the <c>+m</c> (moderated) write check, the <c>+t</c> (topic-locked)
+    /// topic check, and the <c>/..MODE</c> mode-set permission. Mirrors <c>conversd</c>'s
+    /// <c>channelop</c>/<c>operator</c>.
+    /// </summary>
+    public bool IsOperator { get; init; }
+
+    /// <summary>
+    /// Channels this user has a standing invitation to (set by <c>/..INVI</c>): they may join a
+    /// private/invite-only (<c>+p</c>/<c>+i</c>) channel they were invited to. An empty set is the
+    /// common case.
+    /// </summary>
+    public IReadOnlySet<int> InvitedChannels { get; init; } = System.Collections.Immutable.ImmutableHashSet<int>.Empty;
+
     /// <summary>When the local user joined / last switched channel.</summary>
     public DateTimeOffset JoinedAt { get; init; }
 }

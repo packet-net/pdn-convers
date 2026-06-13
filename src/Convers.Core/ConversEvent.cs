@@ -40,6 +40,24 @@ public abstract record ConversEvent
     /// <summary>A local user invites another user to a channel.</summary>
     public sealed record LocalInvite(string SessionId, string ToUser, int Channel) : ConversEvent;
 
+    /// <summary>
+    /// A local channel-operator changes the modes of a channel (<c>/..MODE</c>, SPECS line 95). The
+    /// <paramref name="Options"/> string is the verbatim toggle string (e.g. <c>"+mt"</c>,
+    /// <c>"-m"</c>, <c>"+i-s"</c>) — a leading sign selects set/clear and each letter is one of
+    /// <c>silptm</c>. Enforced: only a channel-operator (or global operator) on the channel may set
+    /// modes; a non-operator request is rejected with a notice to the requester. Channel 0 ignores
+    /// all mode letters except <c>+t</c> (matching <c>conversd</c>).
+    /// </summary>
+    public sealed record LocalSetMode(string SessionId, int Channel, string Options) : ConversEvent;
+
+    /// <summary>
+    /// A local user is granted or revoked channel-operator status on a channel (or global-operator
+    /// status when <paramref name="Channel"/> == -1), as a leaf would apply on its own authority or
+    /// on the host operator's instruction (<c>/..OPER</c>, SPECS line 113). <paramref name="Grant"/>
+    /// false revokes. This is the W7a hook the Host's bridge drives; the wire mapping is W7b.
+    /// </summary>
+    public sealed record LocalSetOperator(string SessionId, int Channel, bool Grant) : ConversEvent;
+
     /// <summary>A local user leaves / disconnects.</summary>
     public sealed record LocalLeave(string SessionId, string Reason = "") : ConversEvent;
 
@@ -82,6 +100,25 @@ public abstract record ConversEvent
 
     /// <summary>A <c>/..INVI</c> invitation from the uplink: <paramref name="From"/> invites <paramref name="User"/> to <paramref name="Channel"/>.</summary>
     public sealed record HostInvite(string From, string User, int Channel) : ConversEvent;
+
+    /// <summary>
+    /// A <c>/..MODE</c> channel-mode change from the uplink (SPECS line 95): set
+    /// <paramref name="Channel"/> to the modes in <paramref name="Options"/> (the verbatim toggle
+    /// string, e.g. <c>"+mt"</c>, <c>"-s"</c>). The uplink is authoritative, so this is applied
+    /// without an operator check; it updates the channel snapshot and is honoured locally
+    /// (forwarding suppression for <c>+l</c>, topic-lock for <c>+t</c>, moderation for <c>+m</c>,
+    /// join-gating for <c>+p</c>/<c>+i</c>, hiding for <c>+s</c>/<c>+i</c>).
+    /// </summary>
+    public sealed record HostMode(int Channel, string Options) : ConversEvent;
+
+    /// <summary>
+    /// A <c>/..OPER</c> operator-status change from the uplink (SPECS line 113):
+    /// <paramref name="User"/> becomes (or, with <paramref name="Grant"/> false, ceases to be) a
+    /// channel-operator on <paramref name="Channel"/>, or a global operator when
+    /// <paramref name="Channel"/> == -1. Tracked so the leaf can enforce <c>+m</c>/<c>+t</c> for the
+    /// affected user and reflect op status in the <c>/who</c> snapshot.
+    /// </summary>
+    public sealed record HostOper(string User, string Host, int Channel, bool Grant = true) : ConversEvent;
 
     /// <summary>A <c>/..PING</c> keepalive from the uplink (a pong is requested).</summary>
     public sealed record HostPing : ConversEvent;
