@@ -369,6 +369,14 @@ public class HostLinkTests
         oracle.PushLine(OracleHandshake);
         await h.Link.WaitForUpAsync(new CancellationTokenSource(Timeout).Token);
 
+        // Wait until the queued LocalJoin has actually been applied (announced upstream as a /..USER)
+        // before pushing the inbound MODE. Otherwise, under load, the MODE line can be processed before
+        // the join drains off the local-event queue, so the hub doesn't yet know s1 is on 3333 and the
+        // change is delivered nowhere (a flaky 5 s timeout — the product is fine, the test just raced).
+        await WaitUntilAsync(
+            () => oracle.SentLines.Any(l => HostCommandCodec.Parse(l) is HostUser { User: "M0LTE", ToChannel: 3333 }),
+            "local join applied (announced upstream)");
+
         // The uplink (authoritative) sets the channel's modes; the local listener is told.
         oracle.PushLine(Wire.Host("MODE 3333 +m"));
 
