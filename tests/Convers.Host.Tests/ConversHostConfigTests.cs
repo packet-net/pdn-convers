@@ -21,7 +21,7 @@ public class ConversHostConfigTests
             Assert.True(File.Exists(path));
             Assert.Equal("", config.Callsign);   // blank by default — derived from the node, not hand-set
             Assert.Equal(ConversIdentity.DefaultSsid, config.Ssid);
-            Assert.Equal(ConversHostConfig.PlaceholderDefaultChannel, config.DefaultChannel);
+            Assert.Equal(ConversHostConfig.DefaultChannelNumber, config.DefaultChannel);
             Assert.Equal(18091, config.Web.Port);
 
             // Second load does not recreate.
@@ -41,7 +41,7 @@ public class ConversHostConfigTests
 
         Assert.Equal("", config.Callsign);      // blank — auto-derived from PDN_NODE_CALLSIGN
         Assert.Equal(4, config.Ssid);
-        Assert.Equal(3333, config.DefaultChannel);
+        Assert.Equal(2723, config.DefaultChannel);
         Assert.Equal("127.0.0.1", config.Web.Bind);
         Assert.Null(config.Uplink.Provider);    // no parent yet — uplink unset
         Assert.Equal("", config.OperatorSecret); // operator login disabled by default

@@ -28,7 +28,7 @@ Full design + rationale: **`docs/design.md`** (architecture, 10 load-bearing dec
 |---|---|---|
 | Uplink transport | **No parent/peer node secured yet.** Build *both* providers behind one `IUpstreamLink` (RF-via-RHP-`open`, and direct-TCP-to-hub); leave the default unset until a parent exists. | The live network is **blocked on an external prerequisite** (§4). Develop/test against our own conversd in docker as the stand-in parent. |
 | Downstream peering | **v1 is leaf-only** (users in, one uplink out). Accepting downstream peers is **deferred to W7**. | InboundDemux treats every inbound RF connect as a USER; no inbound `/..HOST` handling in v1. Simplifies the demux (design decision 3). |
-| Default channel | **Fixed default channel** for packet.net users — a `defaultChannel` config key. | Scaffold ships placeholder `3333`; Tom picks the real public number (256–32767, avoid collisions) before go-live. Users land there on connect without choosing. |
+| Default channel | **Fixed default channel** for packet.net users — a `defaultChannel` config key. | Home channel **2723** (Tom's pick, 2026-06-13; a random number in 256–32767). Users land there on connect without choosing. |
 
 These three are now the "Resolved decisions" section at the bottom of `docs/design.md`.
 

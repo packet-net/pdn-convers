@@ -71,7 +71,7 @@ Dependency rule: Protocol and Core never reference Host; Console references Core
 
 8. **Web chat tile.** ASP.NET on the loopback upstream the manifest names; `X-Pdn-Gateway: 1` + `X-Pdn-User` headers are the auth boundary (no second login). pdn usernames map ↔ callsigns via the app's user table, so the owner and web users join the same channels as RF users — the convers analogue of webmail.
 
-9. **Plain-language default, classic as a per-user preference** (verbatim from pdn-bbs's mandate). Canonical commands are words (`join 3333`, `who`, `msg g4abc …`, `topic …`, `leave`, `quit`); any unambiguous prefix works; `help` explains in sentences. `interface: classic` exposes the literal conversd `/`-surface for Winpack-era automated clients; the session engine picks the surface by callsign at connect. The uplink wire is unaffected either way.
+9. **Plain-language default, classic as a per-user preference** (verbatim from pdn-bbs's mandate). Canonical commands are words (`join 2723`, `who`, `msg g4abc …`, `topic …`, `leave`, `quit`); any unambiguous prefix works; `help` explains in sentences. `interface: classic` exposes the literal conversd `/`-surface for Winpack-era automated clients; the session engine picks the surface by callsign at connect. The uplink wire is unaffected either way.
 
 10. **Oracle-first.** Every host-protocol behaviour lands with (a) a transcript test from SPECS, then (b) an assertion against a live `conversd-saupp` container before it's called done — the diff-oracle discipline that paid off in RHPv2 and pdn-bbs. We build conversd from the pinned source (its `Makefile` + `etc/*.rc.d` are in-tree) and run it as our parent.
 
@@ -115,5 +115,5 @@ ui:
 
 1. **Uplink transport (decision 6)** — RESOLVED: **both** providers are built behind one `IUpstreamLink` (RF-via-RHP-`open` and direct-TCP-to-hub), selected by `convers.yaml` `uplink.provider`; the default is left unset until a parent node exists. A parent is still to be arranged (the one external prerequisite).
 2. **Inbound downstream peering** — RESOLVED: v1 is **leaf-only** (users in, one uplink out); accepting downstream HOST peers is the **W7** toggle (decision 4).
-3. **Channel policy** — RESOLVED: a **fixed default channel** (`defaultChannel`; placeholder **3333** — Tom to pick the real 256–32767 public number before go-live). Local-only channels are the conversd `+l` mode, handled in W7.
+3. **Channel policy** — RESOLVED: a **fixed default channel** (`defaultChannel`); the packet.net home channel is **2723** (Tom's pick, a random number in 256–32767). Local-only channels are the conversd `+l` mode, handled in W7.
 ```

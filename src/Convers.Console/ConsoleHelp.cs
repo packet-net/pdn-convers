@@ -27,7 +27,7 @@ public static class ConsoleHelp
         [
             "This is a convers round-table chat. Just type a line to say it to everyone on your channel.",
             "Commands (any unambiguous abbreviation works):",
-            "  join <channel>     move to a chat channel (e.g. 'join 3333' or just 'j 3333')",
+            "  join <channel>     move to a chat channel (e.g. 'join 2723' or just 'j 2723')",
             "  say <text>         say something to your channel (or just type the text)",
             "  who [*]            see who is here ('who' for your channel, 'who *' for everyone)",
             "  msg <call> <text>  send a private message to one person",

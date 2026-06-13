@@ -440,8 +440,8 @@ public sealed record RfSessionConfig
     /// <summary>The leaf's own convers node name, shown in the greeting (the bound callsign).</summary>
     public string NodeName { get; init; } = "convers";
 
-    /// <summary>The fixed default channel a user lands on at connect (design decision: a configured public default).</summary>
-    public int DefaultChannel { get; init; } = 3333;
+    /// <summary>The fixed default channel a user lands on at connect (the packet.net convers home channel).</summary>
+    public int DefaultChannel { get; init; } = 2723;
 
     /// <summary>Lines per page for the pager; 0 disables paging.</summary>
     public int PageLength { get; init; } = 20;

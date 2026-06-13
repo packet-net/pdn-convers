@@ -21,7 +21,7 @@ public static class ChannelNumber
 
     /// <summary>
     /// The lowest channel the handover reserves for public, owner-pickable defaults (256–32767 —
-    /// below this collides with well-known low channels). The shipped placeholder default is 3333.
+    /// below this collides with well-known low channels). The packet.net home channel is 2723.
     /// </summary>
     public const int PublicFloor = 256;
 

@@ -10,10 +10,10 @@ public sealed record ConverseConsoleConfig
     public string NodeName { get; init; } = "convers";
 
     /// <summary>
-    /// The fixed default channel a user lands on at connect when they pick none (design.md /
-    /// HANDOVER: a configured public default; the scaffold ships placeholder 3333).
+    /// The fixed default channel a user lands on at connect when they pick none (the packet.net
+    /// convers home channel; overridden by config at composition time).
     /// </summary>
-    public int DefaultChannel { get; init; } = 3333;
+    public int DefaultChannel { get; init; } = 2723;
 
     /// <summary>
     /// Lines per page for the paclen-friendly pager (mirrors the BBS <c>OP</c> setting). 0 disables

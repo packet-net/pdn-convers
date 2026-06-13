@@ -14,8 +14,8 @@ namespace Convers.Host;
 /// </remarks>
 public sealed record ConversHostConfig
 {
-    /// <summary>The shipped placeholder default channel — Tom picks the real public number before go-live.</summary>
-    public const int PlaceholderDefaultChannel = 3333;
+    /// <summary>The packet.net convers home channel — where local users land at connect (Tom's pick, 2026-06-13).</summary>
+    public const int DefaultChannelNumber = 2723;
 
     /// <summary>
     /// Explicit callsign override. Normally <b>blank</b> — the callsign is derived automatically from
@@ -47,7 +47,7 @@ public sealed record ConversHostConfig
     /// The channel packet.net users land on at connect without choosing (design.md decision: a fixed
     /// default channel; the handover reserves 256–32767, avoiding collisions).
     /// </summary>
-    public int DefaultChannel { get; init; } = PlaceholderDefaultChannel;
+    public int DefaultChannel { get; init; } = DefaultChannelNumber;
 
     /// <summary>Web-chat bind (loopback per the app-gateway contract).</summary>
     public WebConfig Web { get; init; } = new();
@@ -234,10 +234,10 @@ public static class ConversHostConfigFile
         #          email or a short node description). Leave blank for just the identity/version line.
         sysinfo: ""
 
-        # defaultChannel: the channel packet.net users land on at connect without choosing.
-        #                 Must be 0..32767; pick a public number 256..32767 that is not already in
-        #                 use on the network. 3333 is a PLACEHOLDER — change it before go-live.
-        defaultChannel: 3333
+        # defaultChannel: the channel packet.net users land on at connect without choosing — the
+        #                 packet.net convers "home" channel. Must be 0..32767; 2723 is the chosen public
+        #                 number (change it only if it collides with something on your branch of the net).
+        defaultChannel: 2723
 
         # web: the web-chat bind. MUST stay loopback — pdn's app gateway is the trust boundary for
         #      the X-Pdn-* identity headers. The port must match ui.upstream in pdn-app.yaml.

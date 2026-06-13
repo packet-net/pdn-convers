@@ -19,8 +19,8 @@ public sealed record WebChatOptions
     /// <summary>The leaf's own convers callsign / node name (display + the page title).</summary>
     public required string NodeCallsign { get; init; }
 
-    /// <summary>The fixed default channel a first-time web user lands on.</summary>
-    public int DefaultChannel { get; init; } = 3333;
+    /// <summary>The fixed default channel a first-time web user lands on (the packet.net convers home channel).</summary>
+    public int DefaultChannel { get; init; } = 2723;
 
     /// <summary>How many scrollback rows the channel view shows.</summary>
     public int ScrollbackRows { get; init; } = 60;

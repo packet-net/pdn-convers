@@ -9,7 +9,7 @@
 # convers.yaml into its state dir (/var/lib/packetnet/apps/convers) and keeps running. The on-air
 # callsign is derived automatically from the node — <PDN_NODE_CALLSIGN>-<ssid> (the pdn convention
 # that an app lives at an SSID of the node callsign), so you do NOT normally set a callsign. Edit
-# convers.yaml for `sysop:` and `defaultChannel:` (3333 is a placeholder; pick a real public channel);
+# convers.yaml for `sysop:` (the home channel `defaultChannel:` defaults to 2723);
 # leave the `uplink:` block unset until a parent convers node is arranged (HANDOVER.md §4) — then
 # disable/enable (or restart) the app. PDN_NODE_CALLSIGN / PDN_RHP_HOST / PDN_RHP_PORT come from the
 # supervisor environment; convers.db lives in the same state dir. The web port below MUST match
