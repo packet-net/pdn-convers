@@ -31,19 +31,29 @@ public sealed class HostLinkEngine
 {
     private readonly HostLinkOptions _options;
     private readonly TimeProvider _time;
+    private readonly bool _inbound;
 
     private DateTimeOffset _lastInbound;
     private DateTimeOffset _lastPingSent;
     private DateTimeOffset _handshakeSentAt;
     private DateTimeOffset _lastPingRoundTripAt;
 
-    /// <summary>Creates the engine for one connection's lifetime with validated options.</summary>
-    public HostLinkEngine(HostLinkOptions options, TimeProvider timeProvider)
+    /// <summary>
+    /// Creates the engine for one connection's lifetime with validated options.
+    /// <paramref name="inbound"/> selects the role: <see langword="false"/> (default) is the
+    /// <em>outbound</em> uplink role (we dial the parent and send our <c>/..HOST</c> first); when
+    /// <see langword="true"/> it is the <em>inbound</em> downstream-peer role (a peer dialled us — W7c —
+    /// so we wait for <em>their</em> <c>/..HOST</c> and answer with ours, mirroring conversd
+    /// <c>h_host_command</c>). The steady-state behaviour (presence, keepalive, ROUT/SYSI/LOOP) is
+    /// identical for both roles.
+    /// </summary>
+    public HostLinkEngine(HostLinkOptions options, TimeProvider timeProvider, bool inbound = false)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(timeProvider);
         _options = options.Validate();
         _time = timeProvider;
+        _inbound = inbound;
     }
 
     /// <summary>The current FSM state.</summary>
@@ -78,6 +88,27 @@ public sealed class HostLinkEngine
 
         var handshake = new HostHandshake(_options.HostName, _options.Software, _options.Facilities);
         return new EngineStep { OutboundCommands = [handshake] };
+    }
+
+    /// <summary>
+    /// The inbound counterpart of <see cref="OnConnected"/>: a downstream peer dialled us (W7c). We do
+    /// <em>not</em> announce first — we enter <see cref="HostLinkState.Handshaking"/> and wait for
+    /// <em>their</em> <c>/..HOST</c>, then answer with ours (mirroring conversd <c>h_host_command</c>,
+    /// which sends <c>/..HOST &lt;myhostname&gt; …</c> only after accepting the connecting host). Resets
+    /// all link timers to now. The allowlist/password check is the session's responsibility before this
+    /// engine sees a line.
+    /// </summary>
+    public EngineStep OnAccepted()
+    {
+        DateTimeOffset now = _time.GetUtcNow();
+        State = HostLinkState.Handshaking;
+        _lastInbound = now;
+        _handshakeSentAt = now;
+        _lastPingSent = now;
+        NegotiatedFacilities = Facilities.None;
+        PeerHostName = string.Empty;
+        LastRoundTripMs = null;
+        return EngineStep.None;
     }
 
     /// <summary>
@@ -141,12 +172,21 @@ public sealed class HostLinkEngine
     {
         if (command is HostHandshake reply)
         {
-            // Negotiated set: the intersection of what we offered and what the parent advertised.
+            // Negotiated set: the intersection of what we offered and what the peer advertised.
             NegotiatedFacilities = _options.Facilities & reply.Facilities;
             PeerHostName = reply.Hostname;
             State = HostLinkState.Established;
+
+            // Inbound (downstream-peer) role: the peer announced first; answer with OUR /..HOST so they
+            // can complete THEIR handshake (mirroring conversd h_host_command). Outbound role: we already
+            // sent ours on connect, so the reply completes the handshake with nothing to send.
+            IReadOnlyList<HostCommand> outbound = _inbound
+                ? [new HostHandshake(_options.HostName, _options.Software, _options.Facilities)]
+                : [];
+
             return new EngineStep
             {
+                OutboundCommands = outbound,
                 HandshakeCompleted = true,
                 NegotiatedFacilities = NegotiatedFacilities,
             };

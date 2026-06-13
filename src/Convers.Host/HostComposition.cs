@@ -128,13 +128,24 @@ public static class HostComposition
             DefaultChannel = config.DefaultChannel,
             OperatorSecret = config.OperatorSecret,
         };
+
+        // Downstream-peering policy (W7c — off by default; the node is a strict leaf). When enabled, the
+        // demux peeks the first line and hands an allowlisted /..HOST to a downstream-peer session.
+        var peering = new PeeringPolicy(
+            config.Peering.Enabled, config.Peering.Allow ?? [], config.Peering.Password);
+
         builder.Services.AddSingleton(sp => new InboundDemux(
             sp.GetRequiredService<RhpNodeLink>(),
             sp.GetRequiredService<HostLink>(),
             sp.GetRequiredService<LocalSessionRegistry>(),
             sp.GetRequiredService<IConsolePreferences>(),
             sessionConfig,
-            sp.GetRequiredService<ILogger<InboundDemux>>()));
+            sp.GetRequiredService<ILogger<InboundDemux>>(),
+            peering,
+            sp.GetRequiredService<ConversHub>(),
+            hostLinkOptions,
+            time,
+            sp.GetRequiredService<ILoggerFactory>()));
 
         // W5b — the web chat tile's local-session seam: web users join the same channels as RF users
         // (design decision 8), bridged to the shared hub through the SAME HostLink the RF sessions use.
@@ -167,6 +178,7 @@ public static class HostComposition
             uplink = link.IsUp ? "up" : "down",
             peer = link.PeerHostName,
             roundTripMs = link.LastRoundTripMs,
+            downstreamPeers = link.DownstreamPeerCount,
         }));
 
         // W5b — the web chat tile (pdn-bbs webmail style): server-rendered, gateway identity is the auth

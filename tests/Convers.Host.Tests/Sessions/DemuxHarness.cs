@@ -31,7 +31,8 @@ internal sealed class DemuxHarness : IAsyncDisposable
         IConsolePreferences? preferences = null,
         ConversStore? store = null,
         string nodeCall = NodeCall,
-        bool noUplink = false)
+        bool noUplink = false,
+        PeeringPolicy? peering = null)
     {
         Time = new FakeTimeProvider(new DateTimeOffset(2026, 6, 12, 12, 0, 0, TimeSpan.Zero));
         Server = new FakeRhpServer();
@@ -71,7 +72,12 @@ internal sealed class DemuxHarness : IAsyncDisposable
             {
                 NodeName = HostName, DefaultChannel = DefaultChannel, PageLength = 0, OperatorSecret = OperatorSecret,
             },
-            NullLogger<InboundDemux>.Instance);
+            NullLogger<InboundDemux>.Instance,
+            peering ?? PeeringPolicy.Disabled,
+            Hub,
+            new HostLinkOptions { HostName = HostName },
+            Time,
+            NullLoggerFactory.Instance);
 
         _loops.Add(Node.RunAsync(_cts.Token));
         _loops.Add(Link.RunAsync(_cts.Token));

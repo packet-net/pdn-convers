@@ -330,4 +330,57 @@ public class HostLinkEngineTests
         Assert.Equal(HostLinkState.Handshaking, engine.State);
         Assert.IsType<ConversEvent.HostUser>(Assert.Single(step.HubEvents));
     }
+
+    // ---------------------------------------------------------------- W7c: inbound (downstream-peer) role
+
+    private static (HostLinkEngine Engine, FakeTimeProvider Time) NewInboundEngine()
+    {
+        var time = new FakeTimeProvider(T0);
+        return (new HostLinkEngine(Options(), time, inbound: true), time);
+    }
+
+    [Fact]
+    public void Inbound_OnAccepted_DoesNotAnnounceFirst_AndEntersHandshaking()
+    {
+        (HostLinkEngine engine, _) = NewInboundEngine();
+
+        EngineStep step = engine.OnAccepted();
+
+        // The downstream peer announced to us; we must NOT send our /..HOST until we have seen theirs.
+        Assert.True(step.IsEmpty);
+        Assert.Equal(HostLinkState.Handshaking, engine.State);
+    }
+
+    [Fact]
+    public void Inbound_OnPeerHandshake_RepliesWithOurHandshake_AndEstablishes()
+    {
+        (HostLinkEngine engine, _) = NewInboundEngine();
+        engine.OnAccepted();
+
+        // A downstream peer sends its /..HOST first; we answer with ours and come up.
+        EngineStep step = engine.OnLineReceived(Wire.Host("HOST GB7XYZ saupp1.62a Aadmpunfi"));
+
+        Assert.True(step.HandshakeCompleted);
+        Assert.Equal(HostLinkState.Established, engine.State);
+        Assert.Equal("GB7XYZ", engine.PeerHostName);
+        var reply = Assert.IsType<HostHandshake>(Assert.Single(step.OutboundCommands));
+        Assert.Equal("PDNCONV", reply.Hostname);
+        Assert.Equal("Aampun", FacilitiesCodec.Format(reply.Facilities));
+        // Negotiated = ours ∩ theirs.
+        Assert.Equal("Aampun", FacilitiesCodec.Format(engine.NegotiatedFacilities));
+    }
+
+    [Fact]
+    public void Inbound_AfterEstablished_InboundCmsg_BecomesHubEvent()
+    {
+        (HostLinkEngine engine, _) = NewInboundEngine();
+        engine.OnAccepted();
+        engine.OnLineReceived(Wire.Host("HOST GB7XYZ saupp1.62a Aadmpunfi"));
+
+        EngineStep step = engine.OnLineReceived(Wire.Host("CMSG g4abc 3333 hi from downstream"));
+
+        var cmsg = Assert.IsType<ConversEvent.HostChannelMessage>(Assert.Single(step.HubEvents));
+        Assert.Equal("g4abc", cmsg.User);
+        Assert.Equal(3333, cmsg.Channel);
+    }
 }

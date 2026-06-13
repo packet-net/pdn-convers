@@ -40,17 +40,27 @@ public sealed class HostLink : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly TimeSpan _tickInterval;
 
-    // Work items queued by the demux (W5), drained on the link's owning loop so the hub stays
-    // single-threaded: either a local-originated event to apply, or a read-only snapshot of the hub for
-    // an RF session's `who`/topic query (run on the loop so no lock is needed — design decision 2).
+    // Work items queued by the demux (W5) and downstream peer sessions (W7c), drained on the link's owning
+    // loop so the hub stays single-threaded: a local-originated event to apply, a read-only snapshot of the
+    // hub for an RF session's `who`/topic query, or an inbound /.. command from a downstream peer to relay
+    // and apply (run on the loop so no lock is needed — design decision 2).
     private readonly System.Threading.Channels.Channel<HubWork> _localEvents =
         System.Threading.Channels.Channel.CreateUnbounded<HubWork>(
             new UnboundedChannelOptions { SingleReader = true });
+
+    // Registered downstream peers (W7c), keyed by peer id. Empty for a strict leaf (the default — no
+    // peering), so the relay/fan-out below collapses to "the one uplink" and the node stays a leaf
+    // (design decision 1). Mutated only when a peer session attaches/detaches; read on the owning loop.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, IPeerSink> _peers =
+        new(StringComparer.Ordinal);
 
     private volatile IUpstreamLink? _link;
     private volatile TaskCompletionSource _up = NewTcs();
     private long _lastRoundTripMs = -1;
     private volatile string _peerHostName = string.Empty;
+
+    /// <summary>The peer id under which the uplink itself is addressed in the relay fan-out.</summary>
+    public const string UplinkPeerId = "uplink";
 
     /// <summary>Creates the link. Call <see cref="RunAsync"/> to start the connect/reconnect loop.</summary>
     public HostLink(
@@ -116,8 +126,47 @@ public sealed class HostLink : IAsyncDisposable
     public ValueTask SubmitLocalEventAsync(ConversEvent @event, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(@event);
-        return _localEvents.Writer.WriteAsync(new HubWork(@event, null), cancellationToken);
+        return _localEvents.Writer.WriteAsync(new HubWork(@event, null, null), cancellationToken);
     }
+
+    /// <summary>
+    /// Submit one inbound <c>/..</c> command received from a downstream peer (W7c). It is processed on the
+    /// link's owning loop: relayed to every <em>other</em> connected host (the SPECS golden rule, honouring
+    /// the loop guard — see <see cref="PeerRelay"/>) and fed to the hub for local fan-out and state. This is
+    /// the inbound mirror of how the uplink feeds its own inbound lines (<see cref="ApplyStepAsync"/>).
+    /// </summary>
+    public ValueTask SubmitPeerInboundAsync(
+        HostCommand command, string originPeerId, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentException.ThrowIfNullOrEmpty(originPeerId);
+        return _localEvents.Writer.WriteAsync(new HubWork(null, null, new PeerInbound(command, originPeerId)), cancellationToken);
+    }
+
+    /// <summary>
+    /// Register a downstream peer's sink (W7c) so local-originated <c>/..</c> traffic fans out to it and a
+    /// peer's traffic is relayed to it (never back to its origin). Idempotent per <paramref name="sink"/>
+    /// id (a reconnect with the same id replaces). Safe to call off the owning loop.
+    /// </summary>
+    public void RegisterPeer(IPeerSink sink)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        _peers[sink.PeerId] = sink;
+        LogPeerRegistered(_logger, sink.PeerId, _peers.Count, null);
+    }
+
+    /// <summary>Remove a downstream peer's sink (on disconnect). Idempotent.</summary>
+    public void UnregisterPeer(string peerId)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(peerId);
+        if (_peers.TryRemove(peerId, out _))
+        {
+            LogPeerUnregistered(_logger, peerId, _peers.Count, null);
+        }
+    }
+
+    /// <summary>The number of downstream peers currently attached (0 for a strict leaf).</summary>
+    public int DownstreamPeerCount => _peers.Count;
 
     /// <summary>
     /// Run a read-only snapshot of the hub on the link's owning loop (so the hub is never read off-loop —
@@ -140,12 +189,18 @@ public sealed class HostLink : IAsyncDisposable
             }
         }
 
-        await _localEvents.Writer.WriteAsync(new HubWork(null, Capture), cancellationToken).ConfigureAwait(false);
+        await _localEvents.Writer.WriteAsync(new HubWork(null, Capture, null), cancellationToken).ConfigureAwait(false);
         return await tcs.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>One unit of hub work drained on the owning loop: a local event to apply, or a snapshot read.</summary>
-    private readonly record struct HubWork(ConversEvent? Event, Action<ConversHub>? Snapshot);
+    /// <summary>
+    /// One unit of hub work drained on the owning loop: a local event to apply, a snapshot read, or an
+    /// inbound <c>/..</c> command from a downstream peer to relay-and-apply (W7c). Exactly one is set.
+    /// </summary>
+    private readonly record struct HubWork(ConversEvent? Event, Action<ConversHub>? Snapshot, PeerInbound? Peer);
+
+    /// <summary>An inbound host command from a downstream peer plus the id of the peer it arrived on.</summary>
+    private readonly record struct PeerInbound(HostCommand Command, string OriginPeerId);
 
     /// <summary>The connect → handshake → keepalive → reconnect loop; runs until cancelled.</summary>
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -272,6 +327,22 @@ public sealed class HostLink : IAsyncDisposable
                 EngineStep step = engine.OnLineReceived(line);
                 everEstablished |= step.HandshakeCompleted;
 
+                // Golden rule (W7c): once established, relay the uplink's inbound /.. content down to every
+                // downstream peer (a no-op for a strict leaf — no peers registered). The uplink is just the
+                // "other host" from a downstream peer's point of view. Link-local control (HOST/PING/PONG/
+                // LOOP/ROUT/SYSI) is filtered by PeerRelay and never transited.
+                if (engine.State == HostLinkState.Established && !_peers.IsEmpty &&
+                    HostCommandCodec.TryParse(line, out HostCommand? inbound) && inbound is not null)
+                {
+                    HostCommand? forwarded = PeerRelay.Forwarded(inbound);
+                    if (forwarded is not null)
+                    {
+                        await FanOutToPeersAsync(
+                            forwarded, exceptPeerId: UplinkPeerId, includeUplink: false, link, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                }
+
                 if (!await ApplyStepAsync(link, step, cancellationToken).ConfigureAwait(false))
                 {
                     return everEstablished; // engine asked to drop
@@ -354,6 +425,12 @@ public sealed class HostLink : IAsyncDisposable
                 continue;
             }
 
+            if (work.Peer is { } peer)
+            {
+                await ApplyPeerInboundAsync(link, peer, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
             if (work.Event is not { } @event)
             {
                 continue;
@@ -386,13 +463,53 @@ public sealed class HostLink : IAsyncDisposable
     }
 
     /// <summary>
-    /// Routes the hub's fan-out: <c>Send*</c>/<c>SendPong</c> go up the wire (best-effort — silently
-    /// skipped when no link is up, so local fan-out still works in the no-uplink/local-only configuration),
-    /// <c>DropUplink</c> is honoured by reading it (the engine independently drops on /..LOOP), and every
-    /// <c>Deliver*</c> goes to the local sink.
+    /// Applies one inbound <c>/..</c> command from a downstream peer on the owning loop (W7c): relay it to
+    /// every <em>other</em> connected host (the SPECS golden rule via <see cref="PeerRelay"/>, honouring the
+    /// loop guard), then feed it to the hub exactly as the uplink's own inbound lines are fed — surfacing it
+    /// to the chat-log observer and fanning the hub's resulting actions out to local sessions and the uplink.
+    /// A single malformed peer command never wedges the loop (it is the only drainer of this queue).
+    /// </summary>
+    private async Task ApplyPeerInboundAsync(IUpstreamLink? link, PeerInbound peer, CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Golden rule: relay to every host except the one it came from (no echo back to origin).
+            HostCommand? forwarded = PeerRelay.Forwarded(peer.Command);
+            if (forwarded is not null)
+            {
+                await FanOutToPeersAsync(
+                    forwarded, exceptPeerId: peer.OriginPeerId, includeUplink: true, link, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            // Feed the hub for local fan-out and state, mirroring the uplink's ApplyStepAsync: surface for
+            // chat-logging first, then advance. The hub's resulting Send* actions go to the uplink and to
+            // peers OTHER than the origin (DispatchActionsAsync below), so a downstream-origin message still
+            // reaches the upstream network without echoing back to the sender.
+            ConversEvent? @event = HostBridge.ToEvent(peer.Command);
+            if (@event is not null)
+            {
+                _inbound.OnInbound(@event);
+                await DispatchActionsAsync(link, _hub.Advance(@event), cancellationToken, exceptPeerId: peer.OriginPeerId)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogLocalEventFailed(_logger, ex.Message, null);
+        }
+    }
+
+    /// <summary>
+    /// Routes the hub's fan-out: <c>Send*</c>/<c>SendPong</c> go up the wire to the uplink AND to every
+    /// downstream peer (W7c) — best-effort, silently skipped when no link is up, so local fan-out still
+    /// works in the no-uplink/local-only configuration. <paramref name="exceptPeerId"/> suppresses the copy
+    /// back to a peer-origin event (the loop guard). <c>DropUplink</c> is honoured by reading it (the engine
+    /// independently drops on /..LOOP), and every <c>Deliver*</c> goes to the local sink.
     /// </summary>
     private async Task DispatchActionsAsync(
-        IUpstreamLink? link, IReadOnlyList<ConversAction> actions, CancellationToken cancellationToken)
+        IUpstreamLink? link, IReadOnlyList<ConversAction> actions, CancellationToken cancellationToken,
+        string? exceptPeerId = null)
     {
         foreach (ConversAction action in actions)
         {
@@ -405,14 +522,51 @@ public sealed class HostLink : IAsyncDisposable
             HostCommand? command = HostBridge.ToHostCommand(action);
             if (command is not null)
             {
-                if (link is not null)
+                // The uplink gets it unless it is the origin (a downstream-origin event still reaches
+                // upstream; an uplink-origin event is never re-sent up by this path — peer-inbound never
+                // names the uplink as a Send* origin, only as a relay target handled in FanOutToPeers).
+                if (link is not null && !string.Equals(exceptPeerId, UplinkPeerId, StringComparison.Ordinal))
                 {
                     await SendCommandAsync(link, command, cancellationToken).ConfigureAwait(false);
+                }
+
+                // A PONG is a per-link keepalive answer (to the uplink's PING) — it must NOT be fanned out
+                // to downstream peers (each peer's keepalive is answered by its own session engine). Every
+                // other Send* (presence/messages/topics/modes) is genuine network content the peers want.
+                if (action is not ConversAction.SendPong)
+                {
+                    await FanOutToPeersAsync(command, exceptPeerId, includeUplink: false, link, cancellationToken)
+                        .ConfigureAwait(false);
                 }
             }
             else
             {
                 _local.Deliver(action);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Fans one host command out to every registered downstream peer except <paramref name="exceptPeerId"/>
+    /// (the loop guard — never echo back to a peer's origin), and optionally (awaited) to the uplink. A
+    /// no-op for a strict leaf (no peers, no relay), so the common path stays exactly as before. Each
+    /// downstream send is a non-blocking enqueue onto that peer's own ordered write path; the uplink send,
+    /// when requested, is awaited on this loop so the relay copy stays ordered with the loop's other sends.
+    /// </summary>
+    private async Task FanOutToPeersAsync(
+        HostCommand command, string? exceptPeerId, bool includeUplink, IUpstreamLink? link,
+        CancellationToken cancellationToken)
+    {
+        if (includeUplink && link is not null && !string.Equals(exceptPeerId, UplinkPeerId, StringComparison.Ordinal))
+        {
+            await SendCommandAsync(link, command, cancellationToken).ConfigureAwait(false);
+        }
+
+        foreach (KeyValuePair<string, IPeerSink> entry in _peers)
+        {
+            if (!string.Equals(entry.Key, exceptPeerId, StringComparison.Ordinal))
+            {
+                entry.Value.Enqueue(command);
             }
         }
     }
@@ -570,4 +724,12 @@ public sealed class HostLink : IAsyncDisposable
     private static readonly Action<ILogger, long, Exception?> LogRoundTrip =
         LoggerMessage.Define<long>(LogLevel.Debug, new EventId(7, "UplinkRoundTrip"),
             "Uplink round-trip (link-time p): {Milliseconds}ms");
+
+    private static readonly Action<ILogger, string, int, Exception?> LogPeerRegistered =
+        LoggerMessage.Define<string, int>(LogLevel.Information, new EventId(8, "DownstreamPeerRegistered"),
+            "Downstream peer {PeerId} attached ({Count} peer(s) now)");
+
+    private static readonly Action<ILogger, string, int, Exception?> LogPeerUnregistered =
+        LoggerMessage.Define<string, int>(LogLevel.Information, new EventId(9, "DownstreamPeerUnregistered"),
+            "Downstream peer {PeerId} detached ({Count} peer(s) now)");
 }

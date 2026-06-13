@@ -57,6 +57,31 @@ public sealed record ConversHostConfig
 
     /// <summary>The single upstream convers host link (design.md decision 6). Unset until a parent exists.</summary>
     public UplinkConfig Uplink { get; init; } = new();
+
+    /// <summary>
+    /// Downstream-peering toggle (W7c — design decisions 1 and 4): whether the node accepts an inbound
+    /// <c>/..HOST</c> from an allowlisted callsign and becomes a small hub instead of a strict leaf.
+    /// <b>Off by default</b>; leave it that way unless you intend to host downstream convers peers.
+    /// </summary>
+    public PeeringConfig Peering { get; init; } = new();
+}
+
+/// <summary>
+/// Inbound downstream-peering configuration (W7c). Mirrors conversd <c>Access … HOST</c> + the optional
+/// host-link password: an explicit callsign allowlist gates who may join as a downstream peer, and an
+/// optional shared password is required when set (host.c <c>check_password</c>). Disabled by default — the
+/// node stays a strict leaf (design decision 1).
+/// </summary>
+public sealed record PeeringConfig
+{
+    /// <summary>Whether to accept inbound downstream HOST peers at all. Default false (strict leaf).</summary>
+    public bool Enabled { get; init; }
+
+    /// <summary>The callsigns allowed to join as downstream peers (the <c>Access … HOST</c> allowlist).</summary>
+    public List<string> Allow { get; init; } = [];
+
+    /// <summary>Optional shared link password a downstream peer must present (via <c>/..PASS</c>) to be admitted.</summary>
+    public string? Password { get; init; }
 }
 
 /// <summary>Web-chat bind configuration. MUST stay loopback (app-gateway contract).</summary>
@@ -244,5 +269,15 @@ public static class ConversHostConfigFile
           # tcp:
           #   host: 44.68.41.2      # e.g. HubNA (NA); find/confirm a UK/EU hub
           #   port: 3600
+
+        # peering: accept INBOUND downstream convers peers (the net is a TREE — one primary uplink, and
+        #          downstream peers below us). OFF by default: pdn-convers is a strict leaf. Enable this
+        #          only to host downstream peers. `allow` is the explicit callsign allowlist (mirrors
+        #          conversd `Access … HOST`); a non-allowlisted /..HOST is treated as ordinary user input.
+        #          `password`, if set, must be presented by the peer (via /..PASS) before its /..HOST.
+        peering:
+          enabled: false
+          allow: []                 # e.g. [GB7XYZ, M0ABC-1]
+          password: null
         """;
 }
