@@ -20,7 +20,7 @@ name: Convers
 version: "0.1.0"
 description: Round-table packet chat — a leaf node on the worldwide convers network, for RF and web users.
 icon: chat
-capabilities: [network, web]  # binds its own callsign over RHPv2; serves its own web UI
+capabilities: [packet, web]  # binds its own callsign over RHPv2; serves its own web UI
 
 # The .NET daemon pdn supervises while the app is enabled. No `session:` block — convers is not a
 # console verb; users connect to its bound callsign over RF, and the node owner uses the web tile.
