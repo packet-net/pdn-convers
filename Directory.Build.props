@@ -7,4 +7,13 @@
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
+
+  <!-- NuGetAudit suppression (TEMPORARY). GHSA-2m69-gcr7-jv3q is a SQLite-native advisory on the
+       transitive SQLitePCLRaw.lib.e_sqlite3 2.1.11 (pulled by Microsoft.Data.Sqlite 10.0.0). It has
+       NO published fixed package version, so no bump clears it; with TreatWarningsAsErrors the NU1903
+       fails every build. Suppress this ONE advisory until a patched native bundle ships — mirrors the
+       same suppression in packet-net/packet.net. See https://github.com/advisories/GHSA-2m69-gcr7-jv3q -->
+  <ItemGroup>
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-2m69-gcr7-jv3q" />
+  </ItemGroup>
 </Project>
