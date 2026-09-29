@@ -17,6 +17,16 @@ jobs:
       - name: Test
         run: dotnet test -c Release --no-build --filter "Category!=Interop"
 
+  package:
+    # Builds the amd64 .deb exactly as a release does. scripts/build-deb.sh reads the packaged
+    # pdn-app.yaml back and fails unless its version matches the build version, so this keeps the
+    # packaging and that check proven on every PR, not just on release day.
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the amd64 .deb
+        run: scripts/build-deb.sh linux-x64 "0.0.0+ci${{ github.run_number }}"
+
   interop:
     # The oracle lane: the conversd-saupp container (docker/compose.oracle.yml), built from the
     # vendored source, stands in as the upstream parent node. W0 proves it is reachable; later

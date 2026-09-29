@@ -4,7 +4,8 @@
     <!-- The pdn-app.yaml manifest's `service.command: ./pdn-convers` names the published binary. -->
     <AssemblyName>pdn-convers</AssemblyName>
     <RootNamespace>Convers.Host</RootNamespace>
-    <!-- Keep in lockstep with pdn-app.yaml `version:`. -->
+    <!-- Dev default only: scripts/build-deb.sh passes -p:Version from the release tag and stamps the same
+         version into the packaged pdn-app.yaml. -->
     <Version>0.1.0</Version>
   </PropertyGroup>
 
