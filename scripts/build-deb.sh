@@ -13,7 +13,7 @@
 #
 # The .deb carries exactly the CODE:
 #   usr/share/packetnet/apps/convers/pdn-convers     (the self-contained single-file binary)
-#   usr/share/packetnet/apps/convers/pdn-app.yaml    (the app manifest, copied from repo root)
+#   usr/share/packetnet/apps/convers/pdn-app.yaml    (the app manifest, from repo root, version stamped)
 # Runtime STATE (convers.db, convers.yaml) lives in /var/lib/packetnet/apps/convers and is NEVER
 # shipped — see docs/release-pipeline.md for the code-vs-state split.
 set -euo pipefail
@@ -72,7 +72,14 @@ install -d "$stage/usr/share/packetnet/apps/convers" "$stage/DEBIAN"
 # CODE only: the single-file binary (0755) + the app manifest (0644). NEVER ship
 # convers.yaml / convers.db (runtime state — lives in /var/lib/packetnet/apps/convers).
 install -m 0755 "$bin" "$stage/usr/share/packetnet/apps/convers/pdn-convers"
-install -m 0644 "$root/pdn-app.yaml" "$stage/usr/share/packetnet/apps/convers/pdn-app.yaml"
+# The manifest's `version:` is what pdn's installed-apps list shows, so stamp it from the build
+# version (the tag, for a release) rather than trusting the hand-edited value in the repo copy.
+# v0.1.4 shipped a manifest still saying 0.1.3 because nothing tied the two together.
+manifest="$stage/usr/share/packetnet/apps/convers/pdn-app.yaml"
+[ "$(grep -c '^version:' "$root/pdn-app.yaml")" = "1" ] || {
+  echo "ERROR: pdn-app.yaml must have exactly one top-level version: line" >&2; exit 1; }
+sed -e "s/^version:.*/version: \"$version\"/" "$root/pdn-app.yaml" > "$manifest"
+chmod 0644 "$manifest"
 
 sed -e "s/@ARCH@/$arch/" -e "s/@VERSION@/$version/" \
     "$root/packaging/control.in" > "$stage/DEBIAN/control"
@@ -85,6 +92,13 @@ mkdir -p "$root/artifacts"
 # -Zxz: pin xz - dpkg-deb's zstd default (dpkg >= 1.21.18) can't be unpacked by
 # Debian Bullseye's dpkg, so a zstd .deb refuses to install there.
 dpkg-deb --build --root-owner-group -Zxz "$stage" "$out"
+
+# Read the manifest back out of the built package: the version pdn will display must be this build's.
+packaged="$(dpkg-deb --fsys-tarfile "$out" | tar -xO ./usr/share/packetnet/apps/convers/pdn-app.yaml | grep '^version:')"
+if [ "$packaged" != "version: \"$version\"" ]; then
+  echo "ERROR: packaged pdn-app.yaml says '$packaged', expected version \"$version\"" >&2
+  exit 1
+fi
 
 echo "==> built $out"
 dpkg-deb --info "$out"

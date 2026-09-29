@@ -17,7 +17,9 @@
 manifest: 1
 id: convers                   # must equal the package directory name
 name: Convers
-version: "0.1.3"
+# scripts/build-deb.sh overwrites this with the package version (the release tag), so the shipped
+# manifest always matches the .deb. Bumping it here is tidy but not required.
+version: "0.1.5"
 description: Round-table packet chat — a leaf node on the worldwide convers network, for RF and web users.
 icon: chat
 capabilities: [packet, web]  # binds its own callsign over RHPv2; serves its own web UI

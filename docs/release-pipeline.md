@@ -12,7 +12,7 @@ carries exactly the **code**:
 
 ```
 usr/share/packetnet/apps/convers/pdn-convers     # the self-contained single-file binary (0755)
-usr/share/packetnet/apps/convers/pdn-app.yaml    # the app manifest, copied from the repo root (0644)
+usr/share/packetnet/apps/convers/pdn-app.yaml    # the app manifest from the repo root, version stamped (0644)
 ```
 
 That is all. No config, no database, no systemd unit (the app is supervised by the packetnet node,
