@@ -9,6 +9,18 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
+      # Self-hosted runners: put the SDK under the runner account's home, which it can always write,
+      # never in the system install (which it cannot). Workloads install there too, without root.
+      - name: Choose where setup-dotnet installs
+        if: runner.environment == 'self-hosted'
+        run: echo "DOTNET_INSTALL_DIR=$HOME/.dotnet" >> "$GITHUB_ENV"
+      # Install the SDK in the job instead of trusting the runner's: every build then bundles the
+      # current runtime whichever runner picked it up.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: Directory.Packages.props
       - name: Build (Release)
         # The self-hosted runner is RAM-capped (8 GB — see the github-actions-runner-infra
         # note); plain Release build is fine, but keep an eye on parallelism if heavier
@@ -24,6 +36,20 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
+      # Self-hosted runners: put the SDK under the runner account's home, which it can always write,
+      # never in the system install (which it cannot). Workloads install there too, without root.
+      - name: Choose where setup-dotnet installs
+        if: runner.environment == 'self-hosted'
+        run: echo "DOTNET_INSTALL_DIR=$HOME/.dotnet" >> "$GITHUB_ENV"
+      # Install the SDK in the job instead of trusting the runner's: every build then bundles the
+      # current runtime whichever runner picked it up.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: Directory.Packages.props
+      - name: Check the tools this job needs
+        run: scripts/ci-require-tools.sh dpkg-deb:dpkg fakeroot:fakeroot xz:xz-utils tar
       - name: Build the amd64 .deb
         run: scripts/build-deb.sh linux-x64 "0.0.0+ci${{ github.run_number }}"
 
@@ -39,6 +65,20 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+      # Self-hosted runners: put the SDK under the runner account's home, which it can always write,
+      # never in the system install (which it cannot). Workloads install there too, without root.
+      - name: Choose where setup-dotnet installs
+        if: runner.environment == 'self-hosted'
+        run: echo "DOTNET_INSTALL_DIR=$HOME/.dotnet" >> "$GITHUB_ENV"
+      # Install the SDK in the job instead of trusting the runner's: every build then bundles the
+      # current runtime whichever runner picked it up.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: Directory.Packages.props
+      - name: Check the tools this job needs
+        run: scripts/ci-require-tools.sh docker:docker.io
       - name: Oracle clean slate
         run: docker compose -f docker/compose.oracle.yml down -v --remove-orphans || true
       - name: Oracle up (healthcheck-gated)
