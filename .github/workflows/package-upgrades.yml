@@ -1,0 +1,71 @@
+name: package upgrades
+
+on:
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: package-upgrades
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Choose where setup-dotnet installs
+        if: runner.environment == 'self-hosted'
+        run: echo "DOTNET_INSTALL_DIR=$HOME/.dotnet" >> "$GITHUB_ENV"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Upgrade, build and test
+        id: full
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/bump-packages.py pdn-convers.slnx | tee "$RUNNER_TEMP/bump-full.txt"
+          dotnet build -c Release
+          dotnet test -c Release --no-build --filter "Category!=Interop"
+      - name: Security fixes only, if the full upgrade failed
+        if: steps.full.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git reset --hard
+          git clean -fdx -e .dotnet
+          python3 scripts/bump-packages.py pdn-convers.slnx --vulnerable-only | tee "$RUNNER_TEMP/bump-security.txt"
+          dotnet build -c Release
+          dotnet test -c Release --no-build --filter "Category!=Interop"
+      - name: Commit and push to main
+        if: success()
+        shell: bash
+        env:
+          FULL_OUTCOME: ${{ steps.full.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$FULL_OUTCOME" = "failure" ]; then
+            subject="chore(deps): security package fixes"
+            log="$RUNNER_TEMP/bump-security.txt"
+          else
+            subject="chore(deps): package upgrades"
+            log="$RUNNER_TEMP/bump-full.txt"
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -u
+          if git diff --cached --quiet; then
+            echo "nothing to upgrade"
+            exit 0
+          fi
+          { echo "$subject"; echo; cat "$log"; } > "$RUNNER_TEMP/commit-msg.txt"
+          git commit -F "$RUNNER_TEMP/commit-msg.txt"
+          git pull --rebase origin main
+          git push origin HEAD:main
